@@ -1775,6 +1775,19 @@ bool VulkanRenderTargetCache::TryInPassResolveCopy(
     }
   }
 
+  // The resolve draw's fragments must stay inside the render area - a mapped
+  // rectangle beyond the framebuffer extent is undefined behavior (observed as
+  // VK_ERROR_DEVICE_LOST on Adreno).
+  const Framebuffer* framebuffer = last_update_framebuffer();
+  if (!framebuffer) {
+    return reject("no framebuffer");
+  }
+  if (offset_x > 0 || offset_y > 0 ||
+      uint64_t(-offset_x) + width > framebuffer->host_extent.width ||
+      uint64_t(-offset_y) + height > framebuffer->host_extent.height) {
+    return reject("mapped rect outside the render area");
+  }
+
   // Committing the destination may trigger a shared-memory upload that ends
   // the pass (inline, non-hoistable) - re-check afterwards.
   if (!shared_memory.RequestRange(resolve_info.copy_dest_extent_start,

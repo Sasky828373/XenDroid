@@ -387,6 +387,15 @@ bool VulkanRenderTargetCache::Initialize(uint32_t shared_memory_binding_count) {
     color_draw_layout_ = VK_IMAGE_LAYOUT_RENDERING_LOCAL_READ;
     XELOGI("VulkanRenderTargetCache: local-read color attachment mode on");
   }
+  // Setup below can fail after the masks were raised; RENDERING_LOCAL_READ is
+  // only legal while the feature is actually in use, so undo them together.
+  auto disable_local_read = [this]() {
+    local_read_attachments_ = false;
+    color_draw_stage_mask_ = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+    color_draw_access_mask_ = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT |
+                              VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+    color_draw_layout_ = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+  };
   if (local_read_attachments_) {
     VkDescriptorSetLayoutBinding input_attachment_binding;
     input_attachment_binding.binding = 0;
@@ -414,7 +423,7 @@ bool VulkanRenderTargetCache::Initialize(uint32_t shared_memory_binding_count) {
       XELOGE(
           "VulkanRenderTargetCache: Failed to create the input attachment "
           "descriptor set layout, disabling in-pass resolves");
-      local_read_attachments_ = false;
+      disable_local_read();
     } else {
       VkDescriptorSetLayout resolve_inpass_set_layouts[] = {
           command_processor_.GetSingleTransientDescriptorLayout(
@@ -459,7 +468,7 @@ bool VulkanRenderTargetCache::Initialize(uint32_t shared_memory_binding_count) {
         XELOGE(
             "VulkanRenderTargetCache: Failed to create the in-pass resolve "
             "pipeline layout or shaders, disabling in-pass resolves");
-        local_read_attachments_ = false;
+        disable_local_read();
       } else {
         VkDescriptorPoolSize input_attachment_pool_size;
         input_attachment_pool_size.type = VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT;
@@ -1706,6 +1715,19 @@ bool VulkanRenderTargetCache::TryInPassResolveCopy(
   if (rt_key.is_depth || rt_key.msaa_samples != resolve_msaa ||
       !vulkan_rt.HasDescriptorSetInputAttachment()) {
     return reject("rt kind/msaa/descriptor mismatch");
+  }
+  // Match the compute path: the source's own format must be the one the resolve
+  // declares, or the packing below reinterprets the tile wrongly (this also
+  // keeps the source's bpp class in sync with the copy shader's).
+  if (rt_key.GetColorFormat() != resolve_color_format) {
+    return reject("source format mismatch");
+  }
+  // Float16 sources are sampled through the SFLOAT attachment view, so the
+  // round-trip is not bit-exact; leave them to the UINT transfer-view path.
+  if (resolve_color_format == xenos::ColorRenderTargetFormat::k_16_16_FLOAT ||
+      resolve_color_format ==
+          xenos::ColorRenderTargetFormat::k_16_16_16_16_FLOAT) {
+    return reject("float16 needs the uint transfer view");
   }
   RenderPassKey render_pass_key = last_update_render_pass_key();
   RenderTarget* const* accumulated = last_update_accumulated_render_targets();

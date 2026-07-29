@@ -3286,7 +3286,9 @@ void VulkanCommandProcessor::SubmitBarriersAndEnterRenderTargetCacheRenderPass(
       color_attachment.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
       color_attachment.pNext = nullptr;
       color_attachment.imageView = transfer_dest_view;
-      color_attachment.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+      // Must agree with the layout the usage barrier actually recorded, which
+      // is RENDERING_LOCAL_READ when local-read attachments are enabled.
+      color_attachment.imageLayout = render_target_cache_->color_draw_layout();
       color_attachment.resolveMode = VK_RESOLVE_MODE_NONE;
       color_attachment.resolveImageView = VK_NULL_HANDLE;
       color_attachment.resolveImageLayout = VK_IMAGE_LAYOUT_UNDEFINED;

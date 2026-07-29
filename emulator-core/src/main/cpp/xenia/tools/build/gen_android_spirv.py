@@ -81,6 +81,18 @@ def direct_host_resolve_variants():
                     ident += "_cs"
                     variants.append(
                         (ident, "resolve_host_color_full_entry.xesli", defines))
+    for bpp in (32, 64):
+        for ms in (0, 1):
+            ident = f"resolve_host_color_inpass_{bpp}bpp"
+            if ms:
+                ident += "_ms"
+            variants.append((ident + "_ps",
+                             "resolve_host_color_inpass_entry.xesli",
+                             [f"XE_RESOLVE_HOST_COLOR_BPP={bpp}",
+                              "XE_RESOLVE_HOST_COLOR_MSAA_SAMPLES=1",
+                              "XE_RESOLVE_HOST_COLOR_SOURCE_UINT=0",
+                              "XE_RESOLVE_INPASS=1",
+                              f"XE_RESOLVE_INPASS_MSAA={ms}"]))
     for msaa in (1, 2, 4):
         for scaled in (0, 1):
             ident = f"resolve_host_depth_32bpp_{msaa}xmsaa"
@@ -181,10 +193,14 @@ def main():
                         os.path.getmtime(os.path.join(shader_dir, name)))
             for ident, entry, defines in variants:
                 out = os.path.join(out_dir, ident + ".h")
-                # The wrapper's basename minus ".cs" becomes the array id, so
-                # name it "<base>.cs.xesl" where <base> = ident without "_cs".
-                base = ident[:-3] if ident.endswith("_cs") else ident
-                wrapper = os.path.join(wrapper_dir, base + ".cs.xesl")
+                # The wrapper's basename minus ".<stage>" becomes the
+                # array id, so name it "<base>.<stage>.xesl" where <base> =
+                # ident without the trailing "_<stage>".
+                if len(ident) > 3 and ident[-3] == "_" and ident[-2:] in STAGES:
+                    base, stage = ident[:-3], ident[-2:]
+                else:
+                    base, stage = ident, "cs"
+                wrapper = os.path.join(wrapper_dir, base + f".{stage}.xesl")
                 # The entry (and its nested #includes) resolve against the
                 # shader dir, passed below as an extra -I. Write idempotently so
                 # the wrapper mtime stays stable across configures.

@@ -1692,10 +1692,7 @@ bool VulkanRenderTargetCache::TryInPassResolveCopy(
     return reject("no pass open");
   }
   // Bitwise-equivalent color copies: single-sample selects, and at 2x also
-  // the two-sample average.
-  if (resolve_info.copy_dest_info.copy_dest_exp_bias) {
-    return reject("exp bias");
-  }
+  // the two-sample average. copy_dest_exp_bias is applied in-shader.
   bool is_single_sample = xenos::IsSingleCopySampleSelected(
       resolve_info.copy_dest_coordinate_info.copy_sample_select);
   bool is_2x_average = resolve_info.copy_dest_coordinate_info
@@ -1706,9 +1703,10 @@ bool VulkanRenderTargetCache::TryInPassResolveCopy(
   if (!is_single_sample && !is_2x_average) {
     return reject("unsupported sample select");
   }
+  // "Full" classifications are admitted too: exp bias / dest swap are applied
+  // in-shader, and real format conversions still fail the checks below.
   if (!IsResolveDirectHostRTFastCandidate(copy_shader) &&
-      !(is_2x_average &&
-        IsResolveDirectHostRTFullColorCandidate(copy_shader))) {
+      !IsResolveDirectHostRTFullColorCandidate(copy_shader)) {
     return reject("not a direct-host candidate");
   }
   xenos::ColorRenderTargetFormat resolve_color_format =

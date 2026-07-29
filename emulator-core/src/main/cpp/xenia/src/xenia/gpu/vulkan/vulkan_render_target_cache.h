@@ -198,6 +198,18 @@ class VulkanRenderTargetCache final : public RenderTargetCache {
     return gamma_render_target_as_unorm16_;
   }
 
+  // Color attachment usage for guest passes; switches to the
+  // RENDERING_LOCAL_READ layout (+ fragment-stage input-attachment access)
+  // when in-pass resolves are enabled and supported.
+  bool local_read_attachments() const { return local_read_attachments_; }
+  VkPipelineStageFlags color_draw_stage_mask() const {
+    return color_draw_stage_mask_;
+  }
+  VkAccessFlags color_draw_access_mask() const {
+    return color_draw_access_mask_;
+  }
+  VkImageLayout color_draw_layout() const { return color_draw_layout_; }
+
   bool msaa_2x_attachments_supported() const {
     return msaa_2x_attachments_supported_;
   }
@@ -389,6 +401,14 @@ class VulkanRenderTargetCache final : public RenderTargetCache {
           {};
   const Framebuffer* last_update_framebuffer_ = VK_NULL_HANDLE;
 
+  bool local_read_attachments_ = false;
+  VkPipelineStageFlags color_draw_stage_mask_ =
+      VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+  VkAccessFlags color_draw_access_mask_ =
+      VK_ACCESS_COLOR_ATTACHMENT_READ_BIT |
+      VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+  VkImageLayout color_draw_layout_ = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+
   // For host render targets.
 
   // Can only be destroyed when framebuffers referencing it are destroyed!
@@ -450,25 +470,24 @@ class VulkanRenderTargetCache final : public RenderTargetCache {
       return descriptor_set_pool.Get(descriptor_set_index_transfer_source_);
     }
 
-    static void GetDrawUsage(bool is_depth,
-                             VkPipelineStageFlags* stage_mask_out,
-                             VkAccessFlags* access_mask_out,
-                             VkImageLayout* layout_out) {
-      if (stage_mask_out) {
-        *stage_mask_out = is_depth ? kDepthDrawStageMask : kColorDrawStageMask;
-      }
-      if (access_mask_out) {
-        *access_mask_out =
-            is_depth ? kDepthDrawAccessMask : kColorDrawAccessMask;
-      }
-      if (layout_out) {
-        *layout_out = is_depth ? kDepthDrawLayout : kColorDrawLayout;
-      }
-    }
     void GetDrawUsage(VkPipelineStageFlags* stage_mask_out,
                       VkAccessFlags* access_mask_out,
                       VkImageLayout* layout_out) const {
-      GetDrawUsage(key().is_depth, stage_mask_out, access_mask_out, layout_out);
+      bool is_depth = key().is_depth;
+      if (stage_mask_out) {
+        *stage_mask_out = is_depth
+                              ? kDepthDrawStageMask
+                              : render_target_cache_.color_draw_stage_mask();
+      }
+      if (access_mask_out) {
+        *access_mask_out = is_depth
+                               ? kDepthDrawAccessMask
+                               : render_target_cache_.color_draw_access_mask();
+      }
+      if (layout_out) {
+        *layout_out = is_depth ? kDepthDrawLayout
+                               : render_target_cache_.color_draw_layout();
+      }
     }
     VkPipelineStageFlags current_stage_mask() const {
       return current_stage_mask_;

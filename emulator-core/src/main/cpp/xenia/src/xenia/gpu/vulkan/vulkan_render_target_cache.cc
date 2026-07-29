@@ -46,6 +46,14 @@ DEFINE_bool(
     "Vulkan");
 
 DEFINE_bool(
+    vulkan_in_pass_resolve, false,
+    "Prepare color attachments for in-pass EDRAM resolves with "
+    "VK_KHR_dynamic_rendering_local_read: RENDERING_LOCAL_READ image layout "
+    "and input-attachment usage on color render targets. Requires dynamic "
+    "rendering and driver support; no effect otherwise.",
+    "Vulkan");
+
+DEFINE_bool(
     vulkan_direct_host_resolve, true,
     "Resolve eligible (non-format-converting and packable format-converting) "
     "host render targets directly to guest memory with compute shaders instead "
@@ -363,6 +371,17 @@ bool VulkanRenderTargetCache::Initialize(uint32_t shared_memory_binding_count) {
   const VkDevice device = vulkan_device->device();
   const ui::vulkan::VulkanDevice::Properties& device_properties =
       vulkan_device->properties();
+
+  local_read_attachments_ =
+      cvars::vulkan_in_pass_resolve && cvars::vulkan_dynamic_rendering &&
+      device_properties.dynamicRendering &&
+      device_properties.dynamicRenderingLocalRead;
+  if (local_read_attachments_) {
+    color_draw_stage_mask_ |= VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+    color_draw_access_mask_ |= VK_ACCESS_INPUT_ATTACHMENT_READ_BIT;
+    color_draw_layout_ = VK_IMAGE_LAYOUT_RENDERING_LOCAL_READ;
+    XELOGI("VulkanRenderTargetCache: local-read color attachment mode on");
+  }
 
   if (cvars::render_target_path == "accuracy") {
     path_ = Path::kPixelShaderInterlock;
@@ -2610,8 +2629,8 @@ bool VulkanRenderTargetCache::Update(
         VkPipelineStageFlags rt_dst_stage_mask;
         VkAccessFlags rt_dst_access_mask;
         VkImageLayout rt_new_layout;
-        VulkanRenderTarget::GetDrawUsage(i == 0, &rt_dst_stage_mask,
-                                         &rt_dst_access_mask, &rt_new_layout);
+        vulkan_rt.GetDrawUsage(&rt_dst_stage_mask, &rt_dst_access_mask,
+                               &rt_new_layout);
         command_processor_.PushImageMemoryBarrier(
             vulkan_rt.image(),
             ui::vulkan::util::InitializeSubresourceRange(
@@ -3021,7 +3040,7 @@ void VulkanRenderTargetCache::GetLastUpdateRenderingAttachments(
     }
     const auto* vulkan_rt = static_cast<const VulkanRenderTarget*>(rts[1 + i]);
     color_attachment.imageView = vulkan_rt->view_depth_color();
-    color_attachment.imageLayout = VulkanRenderTarget::kColorDrawLayout;
+    color_attachment.imageLayout = color_draw_layout_;
     color_attachment.loadOp =
         (key.depth_and_color_load_dont_care & (uint32_t(1) << (1 + i)))
             ? VK_ATTACHMENT_LOAD_OP_DONT_CARE
@@ -3345,6 +3364,9 @@ RenderTargetCache::RenderTarget* VulkanRenderTargetCache::CreateRenderTarget(
       image_create_info.flags |= VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT;
     }
     image_create_info.usage |= VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+    if (local_read_attachments_) {
+      image_create_info.usage |= VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT;
+    }
   }
   if (image_create_info.format == VK_FORMAT_UNDEFINED) {
     XELOGE("VulkanRenderTargetCache: Unknown {} render target format {}",

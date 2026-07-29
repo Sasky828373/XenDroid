@@ -225,6 +225,9 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
       XE_UI_VULKAN_LOCAL_EXTENSION(EXT_fragment_shader_interlock)
       // #55.
       XE_UI_VULKAN_LOCAL_PROMOTED_EXTENSION(KHR_dynamic_rendering, 1, 3)
+      // #233. In-pass reads of current attachments for tiler-native resolves.
+      XE_UI_VULKAN_STRUCT_PROMOTED_EXTENSION(KHR_dynamic_rendering_local_read,
+                                             1, 4)
       // #277.
       XE_UI_VULKAN_LOCAL_PROMOTED_EXTENSION(
           EXT_shader_demote_to_helper_invocation, 1, 3)
@@ -359,6 +362,10 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
   VulkanFeatures<VkPhysicalDeviceDynamicRenderingFeatures,
                  VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DYNAMIC_RENDERING_FEATURES>
       features_1_3_KHR_dynamic_rendering;
+  VulkanFeatures<
+      VkPhysicalDeviceDynamicRenderingLocalReadFeatures,
+      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DYNAMIC_RENDERING_LOCAL_READ_FEATURES>
+      features_1_4_KHR_dynamic_rendering_local_read;
   // Vulkan 1.1 core subgroup properties.
   VkPhysicalDeviceSubgroupProperties properties_subgroup = {
       VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_PROPERTIES};
@@ -417,6 +424,10 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
         features_1_3_KHR_dynamic_rendering.Link(supported_features_2,
                                                 device_create_info);
       }
+    }
+    if (device->extensions_.ext_1_4_KHR_dynamic_rendering_local_read) {
+      features_1_4_KHR_dynamic_rendering_local_read.Link(supported_features_2,
+                                                         device_create_info);
     }
     if (ext_KHR_portability_subset) {
       features_KHR_portability_subset.Link(supported_features_2,
@@ -858,6 +869,12 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
     }
   }
 
+  if (device->extensions_.ext_1_4_KHR_dynamic_rendering_local_read &&
+      with_gpu_emulation) {
+    XE_UI_VULKAN_FEATURE_2(features_1_4_KHR_dynamic_rendering_local_read,
+                           dynamicRenderingLocalRead);
+  }
+
   if (ext_KHR_portability_subset) {
     if (with_gpu_emulation) {
       XE_UI_VULKAN_FEATURE_2(features_KHR_portability_subset,
@@ -1056,6 +1073,9 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
 #include "xenia/ui/vulkan/functions/device_1_3_core_dynamic_topology.inc"
     }
   }
+  if (properties.apiVersion >= VK_MAKE_API_VERSION(0, 1, 4, 0)) {
+#include "xenia/ui/vulkan/functions/device_1_4_khr_dynamic_rendering_local_read.inc"
+  }
 #undef XE_UI_VULKAN_FUNCTION_PROMOTED
 
   // Non-promoted extensions, and extensions promoted to a Vulkan version not
@@ -1083,6 +1103,11 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
     }
     if (device->extensions_.ext_1_3_KHR_dynamic_rendering) {
 #include "xenia/ui/vulkan/functions/device_1_3_khr_dynamic_rendering.inc"
+    }
+  }
+  if (properties.apiVersion < VK_MAKE_API_VERSION(0, 1, 4, 0)) {
+    if (device->extensions_.ext_1_4_KHR_dynamic_rendering_local_read) {
+#include "xenia/ui/vulkan/functions/device_1_4_khr_dynamic_rendering_local_read.inc"
     }
   }
   if (device->extensions_.ext_KHR_swapchain) {

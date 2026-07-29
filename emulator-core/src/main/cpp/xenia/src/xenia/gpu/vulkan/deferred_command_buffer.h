@@ -399,6 +399,19 @@ class DeferredCommandBuffer {
     std::memcpy(args_ptr + sizeof(ArgsVkPushConstants), values, size);
   }
 
+  void CmdVkSetRenderingInputAttachmentIndices(
+      uint32_t color_attachment_count, const uint32_t* color_attachment_input_indices) {
+    auto& args = *reinterpret_cast<ArgsVkSetRenderingInputAttachmentIndices*>(
+        WriteCommand(Command::kVkSetRenderingInputAttachmentIndices,
+                     sizeof(ArgsVkSetRenderingInputAttachmentIndices)));
+    args.color_attachment_count = color_attachment_count;
+    for (uint32_t i = 0; i < 4; ++i) {
+      args.color_attachment_input_indices[i] =
+          i < color_attachment_count ? color_attachment_input_indices[i]
+                                     : VK_ATTACHMENT_UNUSED;
+    }
+  }
+
   void CmdVkSetBlendConstants(const float* blend_constants) {
     auto& args = *reinterpret_cast<ArgsVkSetBlendConstants*>(WriteCommand(
         Command::kVkSetBlendConstants, sizeof(ArgsVkSetBlendConstants)));
@@ -644,6 +657,7 @@ class DeferredCommandBuffer {
     kVkPipelineBarrier,
     kVkPushConstants,
     kVkSetBlendConstants,
+    kVkSetRenderingInputAttachmentIndices,
     kVkSetDepthBias,
     kVkSetScissor,
     kVkSetStencilCompareMask,
@@ -867,6 +881,11 @@ class DeferredCommandBuffer {
 
   struct ArgsVkSetBlendConstants {
     float blend_constants[4];
+  };
+
+  struct ArgsVkSetRenderingInputAttachmentIndices {
+    uint32_t color_attachment_count;
+    uint32_t color_attachment_input_indices[4];
   };
 
   struct ArgsVkSetDepthBias {

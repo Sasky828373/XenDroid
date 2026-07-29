@@ -453,6 +453,20 @@ bool VulkanCommandProcessor::SetupContext() {
         "bound to the compute shader");
     return false;
   }
+  descriptor_set_layout_binding_transient.stageFlags =
+      VK_SHADER_STAGE_FRAGMENT_BIT;
+  if (dfn.vkCreateDescriptorSetLayout(
+          device, &descriptor_set_layout_create_info, nullptr,
+          &descriptor_set_layouts_single_transient_[size_t(
+              SingleTransientDescriptorLayout::kStorageBufferFragment)]) !=
+      VK_SUCCESS) {
+    XELOGE(
+        "Failed to create a Vulkan descriptor set layout for a storage buffer "
+        "bound to the fragment shader");
+    return false;
+  }
+  descriptor_set_layout_binding_transient.stageFlags =
+      VK_SHADER_STAGE_COMPUTE_BIT;
   descriptor_set_layout_binding_transient.binding = 1;
   descriptor_set_layout_binding_transient.descriptorType =
       VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
@@ -3359,7 +3373,9 @@ VkDescriptorSet VulkanCommandProcessor::AllocateSingleTransientDescriptor(
     const VkDevice device = vulkan_device->device();
     bool is_storage_buffer =
         transient_descriptor_layout ==
-        SingleTransientDescriptorLayout::kStorageBufferCompute;
+            SingleTransientDescriptorLayout::kStorageBufferCompute ||
+        transient_descriptor_layout ==
+            SingleTransientDescriptorLayout::kStorageBufferFragment;
     ui::vulkan::LinkedTypeDescriptorSetAllocator&
         transient_descriptor_allocator =
             is_storage_buffer ? transient_descriptor_allocator_storage_buffer_
@@ -4378,7 +4394,12 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
         std::make_pair(memexport_extent_start,
                        memexport_extent_end - memexport_extent_start));
   } else {
-    shared_memory_->Use(VulkanSharedMemory::Usage::kRead);
+    // With in-pass resolves, fragment shaders may write shared memory inside
+    // any guest pass - declare the write usage up front so no barrier is
+    // needed at the resolve point.
+    shared_memory_->Use(render_target_cache_->local_read_attachments()
+                            ? VulkanSharedMemory::Usage::kGuestDrawReadWrite
+                            : VulkanSharedMemory::Usage::kRead);
   }
 
   // After all commands that may dispatch, copy or insert barriers, submit the

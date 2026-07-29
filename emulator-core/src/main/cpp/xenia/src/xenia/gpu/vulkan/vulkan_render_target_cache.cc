@@ -111,6 +111,11 @@ namespace shaders {
 #include "xenia/gpu/shaders/bytecode/vulkan_spirv/resolve_full_64bpp_scaled_cs.h"
 #include "xenia/gpu/shaders/bytecode/vulkan_spirv/resolve_full_8bpp_cs.h"
 #include "xenia/gpu/shaders/bytecode/vulkan_spirv/resolve_full_8bpp_scaled_cs.h"
+#include "xenia/gpu/shaders/bytecode/vulkan_spirv/resolve_inpass_vs.h"
+#include "xenia/gpu/shaders/bytecode/vulkan_spirv/resolve_host_color_inpass_32bpp_ps.h"
+#include "xenia/gpu/shaders/bytecode/vulkan_spirv/resolve_host_color_inpass_32bpp_ms_ps.h"
+#include "xenia/gpu/shaders/bytecode/vulkan_spirv/resolve_host_color_inpass_64bpp_ps.h"
+#include "xenia/gpu/shaders/bytecode/vulkan_spirv/resolve_host_color_inpass_64bpp_ms_ps.h"
 #include "xenia/gpu/shaders/vulkan_direct_host_resolve_bytecode.h"
 }  // namespace shaders
 
@@ -381,6 +386,90 @@ bool VulkanRenderTargetCache::Initialize(uint32_t shared_memory_binding_count) {
     color_draw_access_mask_ |= VK_ACCESS_INPUT_ATTACHMENT_READ_BIT;
     color_draw_layout_ = VK_IMAGE_LAYOUT_RENDERING_LOCAL_READ;
     XELOGI("VulkanRenderTargetCache: local-read color attachment mode on");
+  }
+  if (local_read_attachments_) {
+    VkDescriptorSetLayoutBinding input_attachment_binding;
+    input_attachment_binding.binding = 0;
+    input_attachment_binding.descriptorType =
+        VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT;
+    input_attachment_binding.descriptorCount = 1;
+    input_attachment_binding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+    input_attachment_binding.pImmutableSamplers = nullptr;
+    VkDescriptorSetLayoutCreateInfo input_attachment_layout_create_info;
+    input_attachment_layout_create_info.sType =
+        VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+    input_attachment_layout_create_info.pNext = nullptr;
+    input_attachment_layout_create_info.flags = 0;
+    input_attachment_layout_create_info.bindingCount = 1;
+    input_attachment_layout_create_info.pBindings = &input_attachment_binding;
+    VkPushConstantRange resolve_inpass_push_constant_range;
+    resolve_inpass_push_constant_range.stageFlags =
+        VK_SHADER_STAGE_FRAGMENT_BIT;
+    resolve_inpass_push_constant_range.offset = 0;
+    resolve_inpass_push_constant_range.size =
+        sizeof(draw_util::ResolveCopyShaderConstants) + 3 * sizeof(int32_t);
+    if (dfn.vkCreateDescriptorSetLayout(
+            device, &input_attachment_layout_create_info, nullptr,
+            &descriptor_set_layout_input_attachment_) != VK_SUCCESS) {
+      XELOGE(
+          "VulkanRenderTargetCache: Failed to create the input attachment "
+          "descriptor set layout, disabling in-pass resolves");
+      local_read_attachments_ = false;
+    } else {
+      VkDescriptorSetLayout resolve_inpass_set_layouts[] = {
+          command_processor_.GetSingleTransientDescriptorLayout(
+              VulkanCommandProcessor::SingleTransientDescriptorLayout ::
+                  kStorageBufferFragment),
+          descriptor_set_layout_input_attachment_};
+      VkPipelineLayoutCreateInfo resolve_inpass_pipeline_layout_create_info;
+      resolve_inpass_pipeline_layout_create_info.sType =
+          VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+      resolve_inpass_pipeline_layout_create_info.pNext = nullptr;
+      resolve_inpass_pipeline_layout_create_info.flags = 0;
+      resolve_inpass_pipeline_layout_create_info.setLayoutCount =
+          uint32_t(xe::countof(resolve_inpass_set_layouts));
+      resolve_inpass_pipeline_layout_create_info.pSetLayouts =
+          resolve_inpass_set_layouts;
+      resolve_inpass_pipeline_layout_create_info.pushConstantRangeCount = 1;
+      resolve_inpass_pipeline_layout_create_info.pPushConstantRanges =
+          &resolve_inpass_push_constant_range;
+      resolve_inpass_vertex_shader_ = ui::vulkan::util::CreateShaderModule(
+          vulkan_device, shaders::resolve_inpass_vs,
+          sizeof(shaders::resolve_inpass_vs));
+      resolve_inpass_shaders_[0] = ui::vulkan::util::CreateShaderModule(
+          vulkan_device, shaders::resolve_host_color_inpass_32bpp_ps,
+          sizeof(shaders::resolve_host_color_inpass_32bpp_ps));
+      resolve_inpass_shaders_[1] = ui::vulkan::util::CreateShaderModule(
+          vulkan_device, shaders::resolve_host_color_inpass_64bpp_ps,
+          sizeof(shaders::resolve_host_color_inpass_64bpp_ps));
+      resolve_inpass_shaders_[2] = ui::vulkan::util::CreateShaderModule(
+          vulkan_device, shaders::resolve_host_color_inpass_32bpp_ms_ps,
+          sizeof(shaders::resolve_host_color_inpass_32bpp_ms_ps));
+      resolve_inpass_shaders_[3] = ui::vulkan::util::CreateShaderModule(
+          vulkan_device, shaders::resolve_host_color_inpass_64bpp_ms_ps,
+          sizeof(shaders::resolve_host_color_inpass_64bpp_ms_ps));
+      if (dfn.vkCreatePipelineLayout(
+              device, &resolve_inpass_pipeline_layout_create_info, nullptr,
+              &resolve_inpass_pipeline_layout_) != VK_SUCCESS ||
+          resolve_inpass_vertex_shader_ == VK_NULL_HANDLE ||
+          resolve_inpass_shaders_[0] == VK_NULL_HANDLE ||
+          resolve_inpass_shaders_[1] == VK_NULL_HANDLE ||
+          resolve_inpass_shaders_[2] == VK_NULL_HANDLE ||
+          resolve_inpass_shaders_[3] == VK_NULL_HANDLE) {
+        XELOGE(
+            "VulkanRenderTargetCache: Failed to create the in-pass resolve "
+            "pipeline layout or shaders, disabling in-pass resolves");
+        local_read_attachments_ = false;
+      } else {
+        VkDescriptorPoolSize input_attachment_pool_size;
+        input_attachment_pool_size.type = VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT;
+        input_attachment_pool_size.descriptorCount = 1;
+        descriptor_set_pool_input_attachment_ =
+            std::make_unique<ui::vulkan::SingleLayoutDescriptorSetPool>(
+                vulkan_device, 256, 1, &input_attachment_pool_size,
+                descriptor_set_layout_input_attachment_);
+      }
+    }
   }
 
   if (cvars::render_target_path == "accuracy") {
@@ -1170,6 +1259,25 @@ void VulkanRenderTargetCache::Shutdown(bool from_destructor) {
   ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyPipelineLayout, device,
                                          dump_pipeline_layout_color_);
 
+  for (const auto& resolve_inpass_pipeline_pair : resolve_inpass_pipelines_) {
+    if (resolve_inpass_pipeline_pair.second != VK_NULL_HANDLE) {
+      dfn.vkDestroyPipeline(device, resolve_inpass_pipeline_pair.second,
+                            nullptr);
+    }
+  }
+  resolve_inpass_pipelines_.clear();
+  for (size_t i = 0; i < xe::countof(resolve_inpass_shaders_); ++i) {
+    ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyShaderModule, device,
+                                           resolve_inpass_shaders_[i]);
+  }
+  ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyShaderModule, device,
+                                         resolve_inpass_vertex_shader_);
+  ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyPipelineLayout, device,
+                                         resolve_inpass_pipeline_layout_);
+  ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyDescriptorSetLayout,
+                                         device,
+                                         descriptor_set_layout_input_attachment_);
+
   for (const auto& transfer_pipeline_array_pair : transfer_pipelines_) {
     for (VkPipeline transfer_pipeline : transfer_pipeline_array_pair.second) {
       // May be null to prevent recreation attempts.
@@ -1264,6 +1372,7 @@ void VulkanRenderTargetCache::Shutdown(bool from_destructor) {
                                          edram_buffer_memory_);
 
   descriptor_set_pool_sampled_image_x2_.reset();
+  descriptor_set_pool_input_attachment_.reset();
   descriptor_set_pool_sampled_image_.reset();
 
   ui::vulkan::util::DestroyAndNullHandle(
@@ -1510,6 +1619,290 @@ VkPipeline VulkanRenderTargetCache::GetDirectHostDepthResolvePipeline(
   command_processor_.GetVulkanDevice()->SetObjectName(
       VK_OBJECT_TYPE_PIPELINE, pipeline, shader.debug_name);
   return pipeline;
+}
+
+bool VulkanRenderTargetCache::TryInPassResolveCopy(
+    const draw_util::ResolveInfo& resolve_info,
+    const draw_util::ResolveCopyShaderConstants& copy_shader_constants,
+    draw_util::ResolveCopyShaderIndex copy_shader, uint32_t dump_base,
+    uint32_t dump_row_length_used, uint32_t dump_rows, uint32_t dump_pitch,
+    VulkanSharedMemory& shared_memory, VulkanTextureCache& texture_cache,
+    uint32_t& written_address_out, uint32_t& written_length_out) {
+  auto reject = [&](const char* reason) {
+    static std::atomic<uint32_t> logged{0};
+    if (cvars::log_resolve_details &&
+        logged.fetch_add(1, std::memory_order_relaxed) < 64) {
+      XELOGI("InPassResolve reject: {}", reason);
+    }
+    return false;
+  };
+  if (!local_read_attachments_ || GetPath() != Path::kHostRenderTargets ||
+      IsDrawResolutionScaled() || resolve_info.IsCopyingDepth()) {
+    return false;
+  }
+  if (!command_processor_.in_render_pass()) {
+    return reject("no pass open");
+  }
+  // Bitwise-equivalent color copies: single-sample selects, and at 2x also
+  // the two-sample average.
+  if (resolve_info.copy_dest_info.copy_dest_exp_bias) {
+    return reject("exp bias");
+  }
+  bool is_single_sample = xenos::IsSingleCopySampleSelected(
+      resolve_info.copy_dest_coordinate_info.copy_sample_select);
+  bool is_2x_average = resolve_info.copy_dest_coordinate_info
+                               .copy_sample_select ==
+                           xenos::CopySampleSelect::k01 &&
+                       resolve_info.color_edram_info.msaa_samples ==
+                           xenos::MsaaSamples::k2X;
+  if (!is_single_sample && !is_2x_average) {
+    return reject("unsupported sample select");
+  }
+  if (!IsResolveDirectHostRTFastCandidate(copy_shader) &&
+      !(is_2x_average &&
+        IsResolveDirectHostRTFullColorCandidate(copy_shader))) {
+    return reject("not a direct-host candidate");
+  }
+  xenos::ColorRenderTargetFormat resolve_color_format =
+      xenos::ColorRenderTargetFormat(resolve_info.color_edram_info.format);
+  if (resolve_color_format == xenos::ColorRenderTargetFormat::k_8_8_8_8_GAMMA ||
+      !xenos::IsColorResolveFormatBitwiseEquivalent(
+          resolve_color_format,
+          xenos::ColorFormat(resolve_info.copy_dest_info.copy_dest_format))) {
+    return reject("format not bitwise-equivalent");
+  }
+  xenos::MsaaSamples resolve_msaa = resolve_info.color_edram_info.msaa_samples;
+  if (resolve_msaa > xenos::MsaaSamples::k2X) {
+    return false;
+  }
+  uint32_t sample_select = uint32_t(
+      resolve_info.copy_dest_coordinate_info.copy_sample_select);
+  uint32_t first_sample_index =
+      sample_select <= uint32_t(xenos::CopySampleSelect::k3)
+          ? sample_select
+          : (sample_select == uint32_t(xenos::CopySampleSelect::k23) ? 2u : 0u);
+  if (resolve_msaa == xenos::MsaaSamples::k2X && !is_2x_average &&
+      first_sample_index > 1) {
+    return reject("sample index > 1");
+  }
+  if (is_2x_average) {
+    first_sample_index = 0;
+  }
+
+  // A single source render target that fully covers the resolved span and is
+  // one of the current pass's color attachments.
+  GetResolveCopyRectanglesToDump(dump_base, dump_row_length_used, dump_rows,
+                                 dump_pitch, dump_rectangles_);
+  if (dump_rectangles_.size() != 1) {
+    return reject("multiple source rectangles");
+  }
+  const ResolveCopyDumpRectangle& rect = dump_rectangles_.front();
+  if (rect.row_first != 0 || rect.rows != dump_rows ||
+      rect.row_first_start != 0 || rect.row_last_end != dump_row_length_used) {
+    return reject("partial coverage");
+  }
+  auto& vulkan_rt = *static_cast<VulkanRenderTarget*>(rect.render_target);
+  RenderTargetKey rt_key = vulkan_rt.key();
+  if (rt_key.is_depth || rt_key.msaa_samples != resolve_msaa ||
+      !vulkan_rt.HasDescriptorSetInputAttachment()) {
+    return reject("rt kind/msaa/descriptor mismatch");
+  }
+  RenderPassKey render_pass_key = last_update_render_pass_key();
+  RenderTarget* const* accumulated = last_update_accumulated_render_targets();
+  uint32_t color_slot = UINT32_MAX;
+  for (uint32_t i = 0; i < xenos::kMaxColorRenderTargets; ++i) {
+    if ((render_pass_key.depth_and_color_used & (uint32_t(1) << (1 + i))) &&
+        accumulated[1 + i] == rect.render_target) {
+      color_slot = i;
+      break;
+    }
+  }
+  if (color_slot == UINT32_MAX) {
+    return reject("source not a bound attachment");
+  }
+
+  // The fragment shader converts its framebuffer position to the source
+  // sample with one constant offset - reject mappings the EDRAM tile walk
+  // makes non-affine over the resolved rectangle (checking the corners is
+  // sufficient: wrapping is monotonic in both tile axes).
+  bool is_64bpp = rt_key.Is64bpp();
+  uint32_t tile_size_x = is_64bpp ? 40u : 80u;
+  constexpr uint32_t kTileSizeY = 16u;
+  uint32_t pixel_x0 = resolve_info.coordinate_info.edram_offset_x_div_8 << 3;
+  uint32_t pixel_y0 = resolve_info.coordinate_info.edram_offset_y_div_8 << 3;
+  uint32_t width = resolve_info.coordinate_info.width_div_8 << 3;
+  uint32_t height = resolve_info.height_div_8 << 3;
+  if (!width || !height) {
+    return false;
+  }
+  // EDRAM sample space: at 2x the sample rows are the pixel rows doubled plus
+  // the selected sample; the host image is pixel-dimensioned with the sample
+  // as the texel fetch index.
+  uint32_t sample_y_log2 = resolve_msaa == xenos::MsaaSamples::k2X ? 1 : 0;
+  uint32_t sample_y_offset = first_sample_index & 1;
+  uint32_t rt_base_tiles = rt_key.base_tiles;
+  uint32_t rt_pitch_tiles = rt_key.GetPitchTiles();
+  int64_t offset_x = INT64_MAX, offset_y = INT64_MAX;
+  const uint32_t corner_pxs[] = {0, width - 1};
+  const uint32_t corner_pys[] = {0, height - 1};
+  for (uint32_t cy = 0; cy < 2; ++cy) {
+    for (uint32_t cx = 0; cx < 2; ++cx) {
+      uint32_t px = corner_pxs[cx], py = corner_pys[cy];
+      uint32_t sx = px + pixel_x0;
+      uint32_t sy = ((py + pixel_y0) << sample_y_log2) + sample_y_offset;
+      uint32_t tile_x = sx / tile_size_x, tile_y = sy / kTileSizeY;
+      uint32_t nonwrapped = dump_base + tile_y * dump_pitch + tile_x;
+      if (nonwrapped < rt_base_tiles) {
+        return false;
+      }
+      uint32_t linear = nonwrapped - rt_base_tiles;
+      uint32_t rt_tile_y = linear / rt_pitch_tiles;
+      uint32_t rt_tile_x = linear - rt_tile_y * rt_pitch_tiles;
+      int64_t texel_x =
+          int64_t(rt_tile_x) * tile_size_x + (sx - tile_x * tile_size_x);
+      int64_t texel_y =
+          int64_t(rt_tile_y) * kTileSizeY + (sy - tile_y * kTileSizeY);
+      int64_t host_x = texel_x;
+      int64_t host_y = texel_y >> sample_y_log2;
+      int64_t corner_offset_x = int64_t(px) - host_x;
+      int64_t corner_offset_y = int64_t(py) - host_y;
+      if (cx == 0 && cy == 0) {
+        offset_x = corner_offset_x;
+        offset_y = corner_offset_y;
+      } else if (corner_offset_x != offset_x || corner_offset_y != offset_y) {
+        return reject("mapping not affine");
+      }
+    }
+  }
+
+  // Committing the destination may trigger a shared-memory upload that ends
+  // the pass (inline, non-hoistable) - re-check afterwards.
+  if (!shared_memory.RequestRange(resolve_info.copy_dest_extent_start,
+                                  resolve_info.copy_dest_extent_length)) {
+    return false;
+  }
+  if (!command_processor_.in_render_pass()) {
+    return false;
+  }
+
+  VkPipeline pipeline =
+      GetResolveInPassPipeline(render_pass_key, color_slot, is_64bpp);
+  if (pipeline == VK_NULL_HANDLE) {
+    return false;
+  }
+
+  const ui::vulkan::VulkanDevice* const vulkan_device =
+      command_processor_.GetVulkanDevice();
+  const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
+  const VkDevice device = vulkan_device->device();
+
+  VkDescriptorSet descriptor_set_dest =
+      command_processor_.AllocateSingleTransientDescriptor(
+          VulkanCommandProcessor::SingleTransientDescriptorLayout::
+              kStorageBufferFragment);
+  if (descriptor_set_dest == VK_NULL_HANDLE) {
+    return false;
+  }
+  VkDescriptorBufferInfo dest_buffer_info;
+  dest_buffer_info.buffer = shared_memory.buffer();
+  dest_buffer_info.offset = resolve_info.copy_dest_base;
+  dest_buffer_info.range = resolve_info.copy_dest_extent_start -
+                           resolve_info.copy_dest_base +
+                           resolve_info.copy_dest_extent_length;
+  VkWriteDescriptorSet write_descriptor_set_dest = {};
+  write_descriptor_set_dest.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+  write_descriptor_set_dest.dstSet = descriptor_set_dest;
+  write_descriptor_set_dest.dstBinding = 0;
+  write_descriptor_set_dest.descriptorCount = 1;
+  write_descriptor_set_dest.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+  write_descriptor_set_dest.pBufferInfo = &dest_buffer_info;
+  dfn.vkUpdateDescriptorSets(device, 1, &write_descriptor_set_dest, 0,
+                             nullptr);
+
+  DeferredCommandBuffer& command_buffer =
+      command_processor_.deferred_command_buffer();
+
+  // In-pass self-dependency, legal under dynamic rendering local read: order
+  // previous draws' color output before the resolve's input attachment reads.
+  VkMemoryBarrier local_read_barrier;
+  local_read_barrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+  local_read_barrier.pNext = nullptr;
+  local_read_barrier.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+  local_read_barrier.dstAccessMask = VK_ACCESS_INPUT_ATTACHMENT_READ_BIT;
+  command_buffer.CmdVkPipelineBarrier(
+      VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+      VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_DEPENDENCY_BY_REGION_BIT, 1,
+      &local_read_barrier, 0, nullptr, 0, nullptr);
+
+  uint32_t color_attachment_count =
+      32 - xe::lzcnt(render_pass_key.depth_and_color_used >> 1);
+  uint32_t input_attachment_indices[xenos::kMaxColorRenderTargets];
+  for (uint32_t i = 0; i < xenos::kMaxColorRenderTargets; ++i) {
+    input_attachment_indices[i] =
+        i == color_slot ? 0 : VK_ATTACHMENT_UNUSED;
+  }
+  command_buffer.CmdVkSetRenderingInputAttachmentIndices(
+      color_attachment_count, input_attachment_indices);
+
+  command_processor_.BindExternalGraphicsPipeline(pipeline);
+  VkDescriptorSet descriptor_sets[] = {
+      descriptor_set_dest, vulkan_rt.GetDescriptorSetInputAttachment()};
+  command_buffer.CmdVkBindDescriptorSets(
+      VK_PIPELINE_BIND_POINT_GRAPHICS, resolve_inpass_pipeline_layout_, 0,
+      uint32_t(xe::countof(descriptor_sets)), descriptor_sets, 0, nullptr);
+
+  struct {
+    draw_util::ResolveCopyShaderConstants base;
+    int32_t frag_to_pixel_offset[2];
+    int32_t host_sample;
+  } push_constants;
+  push_constants.base = copy_shader_constants;
+  push_constants.base.dest_base -= uint32_t(dest_buffer_info.offset);
+  push_constants.frag_to_pixel_offset[0] = int32_t(offset_x);
+  push_constants.frag_to_pixel_offset[1] = int32_t(offset_y);
+  if (resolve_msaa == xenos::MsaaSamples::k2X) {
+    uint32_t host_sample_0 = draw_util::GetD3D10SampleIndexForGuest2xMSAA(
+        first_sample_index, msaa_2x_attachments_supported_);
+    uint32_t sample_info = host_sample_0;
+    if (is_2x_average) {
+      sample_info |= draw_util::GetD3D10SampleIndexForGuest2xMSAA(
+                         1, msaa_2x_attachments_supported_)
+                         << 8 |
+                     uint32_t(1) << 16;
+    }
+    push_constants.host_sample = int32_t(sample_info);
+  } else {
+    push_constants.host_sample = 0;
+  }
+  command_buffer.CmdVkPushConstants(resolve_inpass_pipeline_layout_,
+                                    VK_SHADER_STAGE_FRAGMENT_BIT, 0,
+                                    sizeof(push_constants), &push_constants);
+
+  VkViewport viewport;
+  viewport.x = float(-offset_x);
+  viewport.y = float(-offset_y);
+  viewport.width = float(width);
+  viewport.height = float(height);
+  viewport.minDepth = 0.0f;
+  viewport.maxDepth = 1.0f;
+  command_processor_.SetViewport(viewport);
+  VkRect2D scissor;
+  scissor.offset.x = int32_t(-offset_x);
+  scissor.offset.y = int32_t(-offset_y);
+  scissor.extent.width = width;
+  scissor.extent.height = height;
+  command_processor_.SetScissor(scissor);
+
+  command_buffer.CmdVkDraw(3, 1, 0, 0);
+
+  shared_memory.MarkInPassWrite(
+      std::make_pair(resolve_info.copy_dest_extent_start,
+                     resolve_info.copy_dest_extent_length));
+  texture_cache.MarkRangeAsResolved(resolve_info.copy_dest_extent_start,
+                                    resolve_info.copy_dest_extent_length);
+  written_address_out = resolve_info.copy_dest_extent_start;
+  written_length_out = resolve_info.copy_dest_extent_length;
+  return true;
 }
 
 bool VulkanRenderTargetCache::TryDirectHostResolveCopy(
@@ -1984,7 +2377,16 @@ bool VulkanRenderTargetCache::Resolve(const Memory& memory,
       uint32_t dump_pitch;
       resolve_info.GetCopyEdramTileSpan(dump_base, dump_row_length_used,
                                         dump_rows, dump_pitch);
-      if (cvars::vulkan_direct_host_resolve &&
+      // Try the on-tile resolve before dumping the owning render targets.
+      if (cvars::vulkan_in_pass_resolve &&
+          copy_shader != draw_util::ResolveCopyShaderIndex::kUnknown) {
+        copied = TryInPassResolveCopy(
+            resolve_info, copy_shader_constants, copy_shader, dump_base,
+            dump_row_length_used, dump_rows, dump_pitch, shared_memory,
+            texture_cache, written_address_out, written_length_out);
+        direct_host_used = copied;
+      }
+      if (!copied && cvars::vulkan_direct_host_resolve &&
           copy_shader != draw_util::ResolveCopyShaderIndex::kUnknown) {
         copied = TryDirectHostResolveCopy(
             resolve_info, copy_shader_constants, copy_shader, dump_base,
@@ -3285,6 +3687,11 @@ VulkanRenderTargetCache::VulkanRenderTarget::~VulkanRenderTarget() {
           ? *render_target_cache_.descriptor_set_pool_sampled_image_x2_
           : *render_target_cache_.descriptor_set_pool_sampled_image_;
   descriptor_set_pool.Free(descriptor_set_index_transfer_source_);
+  if (descriptor_set_index_input_attachment_ != SIZE_MAX &&
+      render_target_cache_.descriptor_set_pool_input_attachment_) {
+    render_target_cache_.descriptor_set_pool_input_attachment_->Free(
+        descriptor_set_index_input_attachment_);
+  }
   if (view_color_transfer_separate_ != VK_NULL_HANDLE) {
     dfn.vkDestroyImageView(device, view_color_transfer_separate_, nullptr);
   }
@@ -3548,10 +3955,43 @@ RenderTargetCache::RenderTarget* VulkanRenderTargetCache::CreateRenderTarget(
   dfn.vkUpdateDescriptorSets(device, key.is_depth ? 2 : 1, descriptor_set_write,
                              0, nullptr);
 
-  return new VulkanRenderTarget(key, *this, image, memory, view_depth_color,
-                                view_depth_stencil, view_stencil,
-                                view_color_transfer_separate,
-                                descriptor_set_index_transfer_source);
+  size_t descriptor_set_index_input_attachment = SIZE_MAX;
+  if (!key.is_depth && local_read_attachments_ &&
+      descriptor_set_pool_input_attachment_) {
+    descriptor_set_index_input_attachment =
+        descriptor_set_pool_input_attachment_->Allocate();
+    if (descriptor_set_index_input_attachment != SIZE_MAX) {
+      VkDescriptorImageInfo input_attachment_image_info;
+      input_attachment_image_info.sampler = VK_NULL_HANDLE;
+      input_attachment_image_info.imageView = view_depth_color;
+      input_attachment_image_info.imageLayout =
+          VK_IMAGE_LAYOUT_RENDERING_LOCAL_READ;
+      VkWriteDescriptorSet input_attachment_write;
+      input_attachment_write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+      input_attachment_write.pNext = nullptr;
+      input_attachment_write.dstSet =
+          descriptor_set_pool_input_attachment_->Get(
+              descriptor_set_index_input_attachment);
+      input_attachment_write.dstBinding = 0;
+      input_attachment_write.dstArrayElement = 0;
+      input_attachment_write.descriptorCount = 1;
+      input_attachment_write.descriptorType =
+          VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT;
+      input_attachment_write.pImageInfo = &input_attachment_image_info;
+      input_attachment_write.pBufferInfo = nullptr;
+      input_attachment_write.pTexelBufferView = nullptr;
+      dfn.vkUpdateDescriptorSets(device, 1, &input_attachment_write, 0,
+                                 nullptr);
+    }
+  }
+
+  VulkanRenderTarget* render_target = new VulkanRenderTarget(
+      key, *this, image, memory, view_depth_color, view_depth_stencil,
+      view_stencil, view_color_transfer_separate,
+      descriptor_set_index_transfer_source);
+  render_target->SetDescriptorSetIndexInputAttachment(
+      descriptor_set_index_input_attachment);
+  return render_target;
 }
 
 bool VulkanRenderTargetCache::IsHostDepthEncodingDifferent(
@@ -6004,6 +6444,188 @@ VkShaderModule VulkanRenderTargetCache::GetTransferShader(
   }
   transfer_shaders_.emplace(key, shader_module);
   return shader_module;
+}
+
+VkPipeline VulkanRenderTargetCache::GetResolveInPassPipeline(
+    RenderPassKey render_pass_key, uint32_t color_slot, bool is_64bpp) {
+  uint64_t key = uint64_t(render_pass_key.key) | (uint64_t(color_slot) << 32) |
+                 (uint64_t(is_64bpp) << 34);
+  auto it = resolve_inpass_pipelines_.find(key);
+  if (it != resolve_inpass_pipelines_.end()) {
+    return it->second;
+  }
+
+  const ui::vulkan::VulkanDevice* const vulkan_device =
+      command_processor_.GetVulkanDevice();
+  const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
+  const VkDevice device = vulkan_device->device();
+
+  VkPipelineShaderStageCreateInfo shader_stages[2];
+  shader_stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+  shader_stages[0].pNext = nullptr;
+  shader_stages[0].flags = 0;
+  shader_stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
+  shader_stages[0].module = resolve_inpass_vertex_shader_;
+  shader_stages[0].pName = "main";
+  shader_stages[0].pSpecializationInfo = nullptr;
+  bool source_is_multisampled =
+      render_pass_key.msaa_samples != xenos::MsaaSamples::k1X;
+  shader_stages[1] = shader_stages[0];
+  shader_stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+  shader_stages[1].module =
+      resolve_inpass_shaders_[uint32_t(is_64bpp) |
+                              (uint32_t(source_is_multisampled) << 1)];
+
+  VkPipelineVertexInputStateCreateInfo vertex_input_state;
+  vertex_input_state.sType =
+      VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+  vertex_input_state.pNext = nullptr;
+  vertex_input_state.flags = 0;
+  vertex_input_state.vertexBindingDescriptionCount = 0;
+  vertex_input_state.pVertexBindingDescriptions = nullptr;
+  vertex_input_state.vertexAttributeDescriptionCount = 0;
+  vertex_input_state.pVertexAttributeDescriptions = nullptr;
+
+  VkPipelineInputAssemblyStateCreateInfo input_assembly_state;
+  input_assembly_state.sType =
+      VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
+  input_assembly_state.pNext = nullptr;
+  input_assembly_state.flags = 0;
+  input_assembly_state.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+  input_assembly_state.primitiveRestartEnable = VK_FALSE;
+
+  VkPipelineViewportStateCreateInfo viewport_state;
+  viewport_state.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
+  viewport_state.pNext = nullptr;
+  viewport_state.flags = 0;
+  viewport_state.viewportCount = 1;
+  viewport_state.pViewports = nullptr;
+  viewport_state.scissorCount = 1;
+  viewport_state.pScissors = nullptr;
+
+  VkPipelineRasterizationStateCreateInfo rasterization_state = {};
+  rasterization_state.sType =
+      VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
+  rasterization_state.polygonMode = VK_POLYGON_MODE_FILL;
+  rasterization_state.cullMode = VK_CULL_MODE_NONE;
+  rasterization_state.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+  rasterization_state.lineWidth = 1.0f;
+
+  uint32_t pass_sample_count = uint32_t(1)
+                               << uint32_t(render_pass_key.msaa_samples);
+  VkPipelineMultisampleStateCreateInfo multisample_state = {};
+  multisample_state.sType =
+      VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
+  multisample_state.rasterizationSamples =
+      (pass_sample_count == 2 && !msaa_2x_attachments_supported_)
+          ? VK_SAMPLE_COUNT_4_BIT
+          : VkSampleCountFlagBits(pass_sample_count);
+
+  VkPipelineDepthStencilStateCreateInfo depth_stencil_state = {};
+  depth_stencil_state.sType =
+      VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
+
+  // No attachment output - the resolved data leaves through the fragment
+  // shader's storage buffer writes.
+  VkPipelineColorBlendAttachmentState
+      color_blend_attachments[xenos::kMaxColorRenderTargets] = {};
+  VkPipelineColorBlendStateCreateInfo color_blend_state = {};
+  color_blend_state.sType =
+      VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+  color_blend_state.attachmentCount =
+      32 - xe::lzcnt(render_pass_key.depth_and_color_used >> 1);
+  color_blend_state.pAttachments = color_blend_attachments;
+
+  std::array<VkDynamicState, 2> dynamic_states = {VK_DYNAMIC_STATE_VIEWPORT,
+                                                  VK_DYNAMIC_STATE_SCISSOR};
+  VkPipelineDynamicStateCreateInfo dynamic_state;
+  dynamic_state.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
+  dynamic_state.pNext = nullptr;
+  dynamic_state.flags = 0;
+  dynamic_state.dynamicStateCount = uint32_t(dynamic_states.size());
+  dynamic_state.pDynamicStates = dynamic_states.data();
+
+  VkFormat color_attachment_formats[xenos::kMaxColorRenderTargets] = {};
+  VkFormat depth_attachment_format = VK_FORMAT_UNDEFINED;
+  if (render_pass_key.depth_and_color_used & 0b1) {
+    depth_attachment_format = GetDepthVulkanFormat(render_pass_key.depth_format);
+  }
+  xenos::ColorRenderTargetFormat color_formats[] = {
+      render_pass_key.color_0_view_format,
+      render_pass_key.color_1_view_format,
+      render_pass_key.color_2_view_format,
+      render_pass_key.color_3_view_format,
+  };
+  uint32_t color_attachment_count = 0;
+  for (uint32_t i = 0; i < xenos::kMaxColorRenderTargets; ++i) {
+    if (!(render_pass_key.depth_and_color_used & (1 << (1 + i)))) {
+      continue;
+    }
+    color_attachment_formats[i] =
+        render_pass_key.color_rts_use_transfer_formats
+            ? GetColorOwnershipTransferVulkanFormat(color_formats[i])
+            : GetColorVulkanFormat(color_formats[i]);
+    color_attachment_count = i + 1;
+  }
+  uint32_t input_attachment_indices[xenos::kMaxColorRenderTargets];
+  for (uint32_t i = 0; i < xenos::kMaxColorRenderTargets; ++i) {
+    input_attachment_indices[i] =
+        i == color_slot ? 0 : VK_ATTACHMENT_UNUSED;
+  }
+  VkRenderingInputAttachmentIndexInfo input_attachment_index_info;
+  input_attachment_index_info.sType =
+      VK_STRUCTURE_TYPE_RENDERING_INPUT_ATTACHMENT_INDEX_INFO;
+  input_attachment_index_info.pNext = nullptr;
+  input_attachment_index_info.colorAttachmentCount = color_attachment_count;
+  input_attachment_index_info.pColorAttachmentInputIndices =
+      input_attachment_indices;
+  input_attachment_index_info.pDepthInputAttachmentIndex = nullptr;
+  input_attachment_index_info.pStencilInputAttachmentIndex = nullptr;
+  VkPipelineRenderingCreateInfo pipeline_rendering_create_info;
+  pipeline_rendering_create_info.sType =
+      VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO;
+  pipeline_rendering_create_info.pNext = &input_attachment_index_info;
+  pipeline_rendering_create_info.viewMask = 0;
+  pipeline_rendering_create_info.colorAttachmentCount = color_attachment_count;
+  pipeline_rendering_create_info.pColorAttachmentFormats =
+      color_attachment_count ? color_attachment_formats : nullptr;
+  pipeline_rendering_create_info.depthAttachmentFormat =
+      depth_attachment_format;
+  pipeline_rendering_create_info.stencilAttachmentFormat =
+      depth_attachment_format;
+
+  VkGraphicsPipelineCreateInfo pipeline_create_info;
+  pipeline_create_info.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+  pipeline_create_info.pNext = &pipeline_rendering_create_info;
+  pipeline_create_info.flags = 0;
+  pipeline_create_info.stageCount = uint32_t(xe::countof(shader_stages));
+  pipeline_create_info.pStages = shader_stages;
+  pipeline_create_info.pVertexInputState = &vertex_input_state;
+  pipeline_create_info.pInputAssemblyState = &input_assembly_state;
+  pipeline_create_info.pTessellationState = nullptr;
+  pipeline_create_info.pViewportState = &viewport_state;
+  pipeline_create_info.pRasterizationState = &rasterization_state;
+  pipeline_create_info.pMultisampleState = &multisample_state;
+  pipeline_create_info.pDepthStencilState = &depth_stencil_state;
+  pipeline_create_info.pColorBlendState = &color_blend_state;
+  pipeline_create_info.pDynamicState = &dynamic_state;
+  pipeline_create_info.layout = resolve_inpass_pipeline_layout_;
+  pipeline_create_info.renderPass = VK_NULL_HANDLE;
+  pipeline_create_info.subpass = 0;
+  pipeline_create_info.basePipelineHandle = VK_NULL_HANDLE;
+  pipeline_create_info.basePipelineIndex = -1;
+  VkPipeline pipeline = VK_NULL_HANDLE;
+  if (dfn.vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1,
+                                    &pipeline_create_info, nullptr,
+                                    &pipeline) != VK_SUCCESS) {
+    XELOGE(
+        "VulkanRenderTargetCache: Failed to create the in-pass resolve "
+        "pipeline for render pass key 0x{:08X} slot {}",
+        render_pass_key.key, color_slot);
+    pipeline = VK_NULL_HANDLE;
+  }
+  resolve_inpass_pipelines_.emplace(key, pipeline);
+  return pipeline;
 }
 
 VkPipeline const* VulkanRenderTargetCache::GetTransferPipelines(

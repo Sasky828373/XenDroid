@@ -366,6 +366,23 @@ void DeferredCommandBuffer::Execute(VkCommandBuffer command_buffer) {
                                    sizeof(ArgsVkPushConstants));
       } break;
 
+      case Command::kVkSetRenderingInputAttachmentIndices: {
+        auto& args = *reinterpret_cast<
+            const ArgsVkSetRenderingInputAttachmentIndices*>(stream);
+        VkRenderingInputAttachmentIndexInfo input_attachment_index_info;
+        input_attachment_index_info.sType =
+            VK_STRUCTURE_TYPE_RENDERING_INPUT_ATTACHMENT_INDEX_INFO;
+        input_attachment_index_info.pNext = nullptr;
+        input_attachment_index_info.colorAttachmentCount =
+            args.color_attachment_count;
+        input_attachment_index_info.pColorAttachmentInputIndices =
+            args.color_attachment_input_indices;
+        input_attachment_index_info.pDepthInputAttachmentIndex = nullptr;
+        input_attachment_index_info.pStencilInputAttachmentIndex = nullptr;
+        dfn.vkCmdSetRenderingInputAttachmentIndices(
+            command_buffer, &input_attachment_index_info);
+      } break;
+
       case Command::kVkSetBlendConstants: {
         auto& args = *reinterpret_cast<const ArgsVkSetBlendConstants*>(stream);
         dfn.vkCmdSetBlendConstants(command_buffer, args.blend_constants);

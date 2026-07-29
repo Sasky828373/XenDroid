@@ -55,6 +55,21 @@ class VulkanSharedMemory : public SharedMemory {
 
   VkBuffer buffer() const { return buffer_; }
 
+  // Notes a range written by an in-pass draw without inserting a barrier at
+  // the write point - ordering happens at the next Use().
+  void MarkInPassWrite(std::pair<uint32_t, uint32_t> written_range) {
+    if (last_written_range_.second) {
+      uint32_t start =
+          std::min(last_written_range_.first, written_range.first);
+      uint32_t end =
+          std::max(last_written_range_.first + last_written_range_.second,
+                   written_range.first + written_range.second);
+      last_written_range_ = std::make_pair(start, end - start);
+    } else {
+      last_written_range_ = written_range;
+    }
+  }
+
   // Whether the shared-memory buffer is persistently host-mapped so guest
   // physical memory can be read directly by the CPU (readback_resolve=uma).
   // True only for a dense, host-visible allocation.

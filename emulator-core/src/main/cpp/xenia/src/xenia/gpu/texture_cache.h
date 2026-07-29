@@ -109,6 +109,46 @@ class TextureCache {
   static uint32_t GuestToHostSwizzle(uint32_t guest_swizzle,
                                      uint32_t host_format_swizzle);
 
+  // Ring of recently resolve-dirtied guest ranges.
+  static constexpr size_t kResolvedRangeHistory = 512;
+  std::array<std::pair<uint32_t, uint32_t>, kResolvedRangeHistory>
+      resolved_ranges_{};
+  size_t resolved_ranges_next_ = 0;
+  void NoteResolvedRange(uint32_t start, uint32_t length) {
+    resolved_ranges_[resolved_ranges_next_ % kResolvedRangeHistory] =
+        std::make_pair(start, length);
+    ++resolved_ranges_next_;
+  }
+  // Whether the union of recent resolve destinations fully covers a guest byte
+  // range. Byte-based, so it is agnostic to the strip-wise resolving games use
+  // for large surfaces (each strip advances copy_dest_base).
+  bool ResolvedRangesCover(uint32_t start, uint32_t length) const {
+    if (!length) {
+      return false;
+    }
+    std::vector<std::pair<uint32_t, uint32_t>> hits;
+    for (const auto& r : resolved_ranges_) {
+      if (r.second && start < r.first + r.second && r.first < start + length) {
+        hits.push_back(r);
+      }
+    }
+    if (hits.empty()) {
+      return false;
+    }
+    std::sort(hits.begin(), hits.end());
+    uint32_t reached = start;
+    for (const auto& r : hits) {
+      if (r.first > reached) {
+        return false;  // gap
+      }
+      reached = std::max(reached, r.first + r.second);
+      if (reached >= start + length) {
+        return true;
+      }
+    }
+    return false;
+  }
+
   void TextureFetchConstantWritten(uint32_t index) {
     texture_bindings_in_sync_ &= ~(UINT32_C(1) << index);
   }
@@ -588,6 +628,13 @@ class TextureCache {
   // Returns nullptr not only if the key is not supported, but also if couldn't
   // create the texture - if it's nullptr, occasionally a recreation attempt
   // should be made.
+  // Drops a texture so the next request recreates it, which is how a texture
+  // that already existed can be given different host properties (the
+  // resolve-to-texture path needs STORAGE usage decided at creation). No-op
+  // if it is still referenced by an unfinished submission.
+  bool RecreateTextureForHostChange(const TextureKey& key,
+                                    uint64_t completed_submission_index);
+
   Texture* FindOrCreateTexture(TextureKey key);
 
   static const LoadShaderInfo& GetLoadShaderInfo(

@@ -983,7 +983,8 @@ class VulkanRenderTargetCache final : public RenderTargetCache {
   // In-pass fragment resolve (VK_KHR_dynamic_rendering_local_read); the color
   // slot is the current pass's color attachment being resolved.
   VkPipeline GetResolveInPassPipeline(RenderPassKey render_pass_key,
-                                      uint32_t color_slot, bool is_64bpp);
+                                      uint32_t color_slot, bool is_64bpp,
+                                      bool writes_texture);
 
   // Selects the transfer mode for one ownership transfer from the source/dest
   // aspects. Shared by PerformTransfersAndResolveClears and the draw-pass
@@ -1102,7 +1103,8 @@ class VulkanRenderTargetCache final : public RenderTargetCache {
       VK_NULL_HANDLE;
   VkPipelineLayout resolve_inpass_pipeline_layout_ = VK_NULL_HANDLE;
   // Bit 0: 64bpp dest, bit 1: multisampled source.
-  VkShaderModule resolve_inpass_shaders_[4] = {};
+  // [is_64bpp | msaa<<1 | writes_texture<<2]
+  VkShaderModule resolve_inpass_shaders_[8] = {};
   VkShaderModule resolve_inpass_vertex_shader_ = VK_NULL_HANDLE;
   // Bits 0-31: RenderPassKey, 32-33: color slot, 34: 64bpp dest.
   std::unordered_map<uint64_t, VkPipeline> resolve_inpass_pipelines_;

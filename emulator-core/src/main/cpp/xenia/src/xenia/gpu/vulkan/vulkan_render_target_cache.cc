@@ -10,6 +10,7 @@
 #include "xenia/gpu/vulkan/vulkan_render_target_cache.h"
 
 #include <algorithm>
+#include <set>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -35,6 +36,13 @@
 
 DECLARE_bool(rt_cache_ownership_claim_memo);
 DECLARE_bool(vulkan_dynamic_rendering);
+
+DEFINE_bool(
+    vulkan_resolve_to_texture, false,
+    "Have the in-pass resolve also store its result straight into the promoted "
+    "destination texture, so vulkan_resolve_to_texture_serve can skip the "
+    "upload that would re-read the same bytes from guest memory.",
+    "Vulkan");
 
 DEFINE_bool(
     vulkan_in_pass_transfers, true,
@@ -118,6 +126,10 @@ namespace shaders {
 #include "xenia/gpu/shaders/bytecode/vulkan_spirv/resolve_full_8bpp_cs.h"
 #include "xenia/gpu/shaders/bytecode/vulkan_spirv/resolve_full_8bpp_scaled_cs.h"
 #include "xenia/gpu/shaders/bytecode/vulkan_spirv/resolve_inpass_vs.h"
+#include "xenia/gpu/shaders/bytecode/vulkan_spirv/resolve_host_color_inpass_32bpp_tex_ps.h"
+#include "xenia/gpu/shaders/bytecode/vulkan_spirv/resolve_host_color_inpass_64bpp_tex_ps.h"
+#include "xenia/gpu/shaders/bytecode/vulkan_spirv/resolve_host_color_inpass_32bpp_ms_tex_ps.h"
+#include "xenia/gpu/shaders/bytecode/vulkan_spirv/resolve_host_color_inpass_64bpp_ms_tex_ps.h"
 #include "xenia/gpu/shaders/bytecode/vulkan_spirv/resolve_host_color_inpass_32bpp_ps.h"
 #include "xenia/gpu/shaders/bytecode/vulkan_spirv/resolve_host_color_inpass_32bpp_ms_ps.h"
 #include "xenia/gpu/shaders/bytecode/vulkan_spirv/resolve_host_color_inpass_64bpp_ps.h"
@@ -424,7 +436,7 @@ bool VulkanRenderTargetCache::Initialize(uint32_t shared_memory_binding_count) {
         VK_SHADER_STAGE_FRAGMENT_BIT;
     resolve_inpass_push_constant_range.offset = 0;
     resolve_inpass_push_constant_range.size =
-        sizeof(draw_util::ResolveCopyShaderConstants) + 3 * sizeof(int32_t);
+        sizeof(draw_util::ResolveCopyShaderConstants) + 5 * sizeof(int32_t);
     if (dfn.vkCreateDescriptorSetLayout(
             device, &input_attachment_layout_create_info, nullptr,
             &descriptor_set_layout_input_attachment_) != VK_SUCCESS) {
@@ -437,7 +449,10 @@ bool VulkanRenderTargetCache::Initialize(uint32_t shared_memory_binding_count) {
           command_processor_.GetSingleTransientDescriptorLayout(
               VulkanCommandProcessor::SingleTransientDescriptorLayout ::
                   kStorageBufferFragment),
-          descriptor_set_layout_input_attachment_};
+          descriptor_set_layout_input_attachment_,
+          command_processor_.GetSingleTransientDescriptorLayout(
+              VulkanCommandProcessor::SingleTransientDescriptorLayout ::
+                  kStorageImageFragment)};
       VkPipelineLayoutCreateInfo resolve_inpass_pipeline_layout_create_info;
       resolve_inpass_pipeline_layout_create_info.sType =
           VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
@@ -465,6 +480,18 @@ bool VulkanRenderTargetCache::Initialize(uint32_t shared_memory_binding_count) {
       resolve_inpass_shaders_[3] = ui::vulkan::util::CreateShaderModule(
           vulkan_device, shaders::resolve_host_color_inpass_64bpp_ms_ps,
           sizeof(shaders::resolve_host_color_inpass_64bpp_ms_ps));
+      resolve_inpass_shaders_[4] = ui::vulkan::util::CreateShaderModule(
+          vulkan_device, shaders::resolve_host_color_inpass_32bpp_tex_ps,
+          sizeof(shaders::resolve_host_color_inpass_32bpp_tex_ps));
+      resolve_inpass_shaders_[5] = ui::vulkan::util::CreateShaderModule(
+          vulkan_device, shaders::resolve_host_color_inpass_64bpp_tex_ps,
+          sizeof(shaders::resolve_host_color_inpass_64bpp_tex_ps));
+      resolve_inpass_shaders_[6] = ui::vulkan::util::CreateShaderModule(
+          vulkan_device, shaders::resolve_host_color_inpass_32bpp_ms_tex_ps,
+          sizeof(shaders::resolve_host_color_inpass_32bpp_ms_tex_ps));
+      resolve_inpass_shaders_[7] = ui::vulkan::util::CreateShaderModule(
+          vulkan_device, shaders::resolve_host_color_inpass_64bpp_ms_tex_ps,
+          sizeof(shaders::resolve_host_color_inpass_64bpp_ms_tex_ps));
       if (dfn.vkCreatePipelineLayout(
               device, &resolve_inpass_pipeline_layout_create_info, nullptr,
               &resolve_inpass_pipeline_layout_) != VK_SUCCESS ||
@@ -472,7 +499,11 @@ bool VulkanRenderTargetCache::Initialize(uint32_t shared_memory_binding_count) {
           resolve_inpass_shaders_[0] == VK_NULL_HANDLE ||
           resolve_inpass_shaders_[1] == VK_NULL_HANDLE ||
           resolve_inpass_shaders_[2] == VK_NULL_HANDLE ||
-          resolve_inpass_shaders_[3] == VK_NULL_HANDLE) {
+          resolve_inpass_shaders_[3] == VK_NULL_HANDLE ||
+          resolve_inpass_shaders_[4] == VK_NULL_HANDLE ||
+          resolve_inpass_shaders_[5] == VK_NULL_HANDLE ||
+          resolve_inpass_shaders_[6] == VK_NULL_HANDLE ||
+          resolve_inpass_shaders_[7] == VK_NULL_HANDLE) {
         XELOGE(
             "VulkanRenderTargetCache: Failed to create the in-pass resolve "
             "pipeline layout or shaders, disabling in-pass resolves");
@@ -1828,8 +1859,19 @@ bool VulkanRenderTargetCache::TryInPassResolveCopy(
     return false;
   }
 
-  VkPipeline pipeline =
-      GetResolveInPassPipeline(render_pass_key, color_slot, is_64bpp);
+  // Resolve-to-texture: if a promoted texture is registered for this
+  // destination, the shader also stores the packed texel straight into it.
+  uint32_t resolve_dest_base_delta = 0;
+  VkImageView resolve_dest_storage_view =
+      cvars::vulkan_resolve_to_texture
+          ? texture_cache.GetResolveDestStorageView(
+                resolve_info.copy_dest_base_unadjusted & 0x1FFFFFFF,
+                &resolve_dest_base_delta)
+          : VK_NULL_HANDLE;
+  const bool writes_texture =
+      resolve_dest_storage_view != VK_NULL_HANDLE;
+  VkPipeline pipeline = GetResolveInPassPipeline(render_pass_key, color_slot,
+                                                 is_64bpp, writes_texture);
   if (pipeline == VK_NULL_HANDLE) {
     return false;
   }
@@ -1887,17 +1929,42 @@ bool VulkanRenderTargetCache::TryInPassResolveCopy(
   command_buffer.CmdVkSetRenderingInputAttachmentIndices(
       color_attachment_count, input_attachment_indices);
 
+  VkDescriptorSet descriptor_set_texture = VK_NULL_HANDLE;
+  if (writes_texture) {
+    descriptor_set_texture = command_processor_.AllocateSingleTransientDescriptor(
+        VulkanCommandProcessor::SingleTransientDescriptorLayout::
+            kStorageImageFragment);
+    if (descriptor_set_texture == VK_NULL_HANDLE) {
+      return false;
+    }
+    VkDescriptorImageInfo storage_image_info = {};
+    storage_image_info.imageView = resolve_dest_storage_view;
+    storage_image_info.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+    VkWriteDescriptorSet write_storage_image = {};
+    write_storage_image.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    write_storage_image.dstSet = descriptor_set_texture;
+    write_storage_image.dstBinding = 0;
+    write_storage_image.descriptorCount = 1;
+    write_storage_image.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    write_storage_image.pImageInfo = &storage_image_info;
+    dfn.vkUpdateDescriptorSets(device, 1, &write_storage_image, 0, nullptr);
+  }
+
   command_processor_.BindExternalGraphicsPipeline(pipeline);
   VkDescriptorSet descriptor_sets[] = {
-      descriptor_set_dest, vulkan_rt.GetDescriptorSetInputAttachment()};
+      descriptor_set_dest, vulkan_rt.GetDescriptorSetInputAttachment(),
+      descriptor_set_texture};
   command_buffer.CmdVkBindDescriptorSets(
       VK_PIPELINE_BIND_POINT_GRAPHICS, resolve_inpass_pipeline_layout_, 0,
-      uint32_t(xe::countof(descriptor_sets)), descriptor_sets, 0, nullptr);
+      writes_texture ? 3u : 2u, descriptor_sets, 0, nullptr);
 
   struct {
     draw_util::ResolveCopyShaderConstants base;
     int32_t frag_to_pixel_offset[2];
     int32_t host_sample;
+    // Destination-texel origin; in the shared push-constant block, so the
+    // range must cover it even for variants that don't read it.
+    int32_t texture_origin[2];
   } push_constants;
   push_constants.base = copy_shader_constants;
   push_constants.base.dest_base -= uint32_t(dest_buffer_info.offset);
@@ -1917,6 +1984,17 @@ bool VulkanRenderTargetCache::TryInPassResolveCopy(
   } else {
     push_constants.host_sample = 0;
   }
+  push_constants.texture_origin[0] = int32_t(resolve_info.copy_dest_x0);
+  // A strip's y0 is relative to its own advanced base, so the rows implied by
+  // the base delta have to be added back. Whole tile rows, so the byte delta
+  // is linear in rows.
+  uint32_t dest_row_bytes =
+      (resolve_info.copy_dest_coordinate_info.pitch_aligned_div_32 << 5) *
+      (is_64bpp ? 8u : 4u);
+  int32_t dest_delta_rows =
+      dest_row_bytes ? int32_t(resolve_dest_base_delta / dest_row_bytes) : 0;
+  push_constants.texture_origin[1] =
+      int32_t(resolve_info.copy_dest_y0) + dest_delta_rows;
   command_buffer.CmdVkPushConstants(resolve_inpass_pipeline_layout_,
                                     VK_SHADER_STAGE_FRAGMENT_BIT, 0,
                                     sizeof(push_constants), &push_constants);
@@ -1937,7 +2015,25 @@ bool VulkanRenderTargetCache::TryInPassResolveCopy(
   command_processor_.SetScissor(scissor);
 
   command_buffer.CmdVkDraw(3, 1, 0, 0);
-
+  if (writes_texture) {
+    texture_cache.MarkResolveDestWritten(
+        resolve_info.copy_dest_base_unadjusted & 0x1FFFFFFF,
+        command_processor_.GetCurrentFrame());
+  }
+  {
+    VulkanTextureCache::ResolveDestDescriptor dest_desc = {};
+    dest_desc.base = resolve_info.copy_dest_base_unadjusted & 0x1FFFFFFF;
+    dest_desc.pitch_div_32 =
+        resolve_info.copy_dest_coordinate_info.pitch_aligned_div_32;
+    dest_desc.x0 = resolve_info.copy_dest_x0;
+    dest_desc.y0 = resolve_info.copy_dest_y0;
+    dest_desc.width = width;
+    dest_desc.height = height;
+    dest_desc.format = uint32_t(resolve_info.copy_dest_info.copy_dest_format);
+    dest_desc.endian = uint32_t(resolve_info.copy_dest_info.copy_dest_endian);
+    dest_desc.is_array = uint32_t(resolve_info.copy_dest_info.copy_dest_array);
+    texture_cache.NoteResolveDestination(dest_desc);
+  }
   shared_memory.MarkInPassWrite(
       std::make_pair(resolve_info.copy_dest_extent_start,
                      resolve_info.copy_dest_extent_length));
@@ -6490,9 +6586,11 @@ VkShaderModule VulkanRenderTargetCache::GetTransferShader(
 }
 
 VkPipeline VulkanRenderTargetCache::GetResolveInPassPipeline(
-    RenderPassKey render_pass_key, uint32_t color_slot, bool is_64bpp) {
+    RenderPassKey render_pass_key, uint32_t color_slot, bool is_64bpp,
+    bool writes_texture) {
   uint64_t key = uint64_t(render_pass_key.key) | (uint64_t(color_slot) << 32) |
-                 (uint64_t(is_64bpp) << 34);
+                 (uint64_t(is_64bpp) << 34) |
+                 (uint64_t(writes_texture) << 35);
   auto it = resolve_inpass_pipelines_.find(key);
   if (it != resolve_inpass_pipelines_.end()) {
     return it->second;
@@ -6517,7 +6615,8 @@ VkPipeline VulkanRenderTargetCache::GetResolveInPassPipeline(
   shader_stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
   shader_stages[1].module =
       resolve_inpass_shaders_[uint32_t(is_64bpp) |
-                              (uint32_t(source_is_multisampled) << 1)];
+                              (uint32_t(source_is_multisampled) << 1) |
+                              (uint32_t(writes_texture) << 2)];
 
   VkPipelineVertexInputStateCreateInfo vertex_input_state;
   vertex_input_state.sType =

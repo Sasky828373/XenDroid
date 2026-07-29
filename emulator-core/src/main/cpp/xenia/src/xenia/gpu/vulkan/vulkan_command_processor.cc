@@ -465,6 +465,21 @@ bool VulkanCommandProcessor::SetupContext() {
         "bound to the fragment shader");
     return false;
   }
+  // Transient: storage image for the resolve-to-texture fragment variant.
+  descriptor_set_layout_binding_transient.descriptorType =
+      VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+  if (dfn.vkCreateDescriptorSetLayout(
+          device, &descriptor_set_layout_create_info, nullptr,
+          &descriptor_set_layouts_single_transient_[size_t(
+              SingleTransientDescriptorLayout::kStorageImageFragment)]) !=
+      VK_SUCCESS) {
+    XELOGE(
+        "Failed to create a Vulkan descriptor set layout for a storage image "
+        "bound to the fragment shader");
+    return false;
+  }
+  descriptor_set_layout_binding_transient.descriptorType =
+      VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
   descriptor_set_layout_binding_transient.stageFlags =
       VK_SHADER_STAGE_COMPUTE_BIT;
   descriptor_set_layout_binding_transient.binding = 1;

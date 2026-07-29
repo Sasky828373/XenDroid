@@ -48,6 +48,11 @@ push_const_begin_xe(b0, space0)
       // Bits 0-7: first host sample index; bits 8-15: second host sample
       // index; bit 16: average the two samples.
       int xe_resolve_inpass_sample;
+      // Origin of the resolve rect in destination surface texels. Added to
+      // pixel_index to address the destination texture directly when the
+      // resolve-to-texture variant is compiled in.
+      int xe_resolve_inpass_texture_x0;
+      int xe_resolve_inpass_texture_y0;
     #endif
   #endif
 push_const_end_xe

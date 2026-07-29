@@ -78,6 +78,12 @@ class SharedMemory {
   // memory copy. Hold the global critical region if relying on this for state
   // transitions such as watch installation.
   bool IsRangeValid(uint32_t start, uint32_t length) const;
+  // Returns whether every page in the range is valid AND was last written by
+  // the GPU (not the CPU). Necessary, not sufficient, for treating a resolve
+  // destination as still GPU-authoritative: page-granular, so it over-claims
+  // on sub-page tails, and sticky across GPU writes so it cannot order one
+  // resolve against another.
+  bool IsRangeGpuWritten(uint32_t start, uint32_t length) const;
 
   void TryFindUploadRange(const uint32_t& block_first,
                           const uint32_t& block_last,

@@ -67,6 +67,8 @@ class VulkanCommandProcessor final : public CommandProcessor {
     // Uniform buffer at binding 1 for shaders that keep binding 0 as push
     // constants for D3D-style root constants.
     kUniformBufferComputeB1,
+    // Storage image at binding 0 for the resolve-to-texture fragment variant.
+    kStorageImageFragment,
     kCount,
   };
 

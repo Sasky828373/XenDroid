@@ -27,6 +27,18 @@ byte_buffer_align8_wo_declare_xe(xe_resolve_dest, 0, 0, u0, space0, 1)
 byte_buffer_align4_wo_declare_xe(xe_resolve_dest, 0, 0, u0, space0, 1)
 #endif
 
+#if XE_RESOLVE_INPASS_TEXTURE
+  // Destination texture, viewed as raw uints so the already-packed guest texel
+  // can be stored with no format conversion.
+  #if XE_RESOLVE_HOST_COLOR_BPP == 64
+layout(set = 2, binding = 0, rg32ui) uniform writeonly uimage2D
+    xe_resolve_inpass_texture;
+  #else
+layout(set = 2, binding = 0, r32ui) uniform writeonly uimage2D
+    xe_resolve_inpass_texture;
+  #endif
+#endif
+
 #if XE_RESOLVE_INPASS_MSAA
 layout(input_attachment_index = 0, set = 1, binding = 0) uniform subpassInputMS
     xe_resolve_inpass_source;
@@ -62,6 +74,13 @@ void main() {
     packed_pixel =
         (packed_pixel & ~0xFFFFu) | (packed_pixel.yx & 0xFFFFu);
   }
+#if XE_RESOLVE_INPASS_TEXTURE
+  imageStore(xe_resolve_inpass_texture,
+             int2_xe(pixel_index) +
+                 int2_xe(push_const_xe(xe_resolve_inpass_texture_x0),
+                         push_const_xe(xe_resolve_inpass_texture_y0)),
+             uint4_xe(packed_pixel.x, packed_pixel.y, 0u, 0u));
+#endif
   uint dest_address = XeResolveDestPixelAddress(resolve_info, pixel_index, 3u);
   byte_buffer_align8_store8_xe(
       xe_resolve_dest, dest_address,
@@ -85,6 +104,13 @@ void main() {
         break;
     }
   }
+#if XE_RESOLVE_INPASS_TEXTURE
+  imageStore(xe_resolve_inpass_texture,
+             int2_xe(pixel_index) +
+                 int2_xe(push_const_xe(xe_resolve_inpass_texture_x0),
+                         push_const_xe(xe_resolve_inpass_texture_y0)),
+             uint4_xe(packed_pixel, 0u, 0u, 0u));
+#endif
   uint dest_address = XeResolveDestPixelAddress(resolve_info, pixel_index, 2u);
   byte_buffer_align4_store4_xe(
       xe_resolve_dest, dest_address,

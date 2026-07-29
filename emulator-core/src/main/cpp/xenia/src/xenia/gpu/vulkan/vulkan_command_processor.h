@@ -181,6 +181,14 @@ class VulkanCommandProcessor final : public CommandProcessor {
     return deferred_command_buffer_;
   }
 
+  // Deferred commands replayed at the head of the submission's command
+  // buffer, before deferred_command_buffer() - holds shared-memory uploads
+  // hoisted out of render passes.
+  DeferredCommandBuffer& deferred_setup_command_buffer() {
+    assert_true(submission_open_);
+    return deferred_setup_command_buffer_;
+  }
+
   bool submission_open() const { return submission_open_; }
   bool in_render_pass() const { return in_render_pass_; }
   uint64_t GetCurrentSubmission() const {
@@ -646,6 +654,11 @@ class VulkanCommandProcessor final : public CommandProcessor {
     uint64_t last_report_ns = 0;
   };
   VkFrameSyncStats vk_frame_sync_stats_;
+
+ public:
+  VkFrameSyncStats& vk_frame_sync_stats() { return vk_frame_sync_stats_; }
+
+ private:
   struct SubmitTimeRecord {
     uint64_t submission;
     uint64_t submit_ns;
@@ -744,6 +757,7 @@ class VulkanCommandProcessor final : public CommandProcessor {
   std::vector<CommandBuffer> command_buffers_writable_;
   std::deque<std::pair<uint64_t, CommandBuffer>> command_buffers_submitted_;
   DeferredCommandBuffer deferred_command_buffer_;
+  DeferredCommandBuffer deferred_setup_command_buffer_;
 
   std::vector<VkSparseMemoryBind> sparse_memory_binds_;
   std::vector<SparseBufferBind> sparse_buffer_binds_;

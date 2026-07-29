@@ -30,6 +30,10 @@ class SharedMemory {
 
   void InvalidateAllPages();
 
+  // Call when a new GPU submission starts recording; resets the tracking of
+  // pages invalidated while the submission was open.
+  void OnGpuSubmissionOpened();
+
   typedef void (*GlobalWatchCallback)(
       const global_unique_lock_type& global_lock, void* context,
       uint32_t address_first, uint32_t address_last, bool invalidated_by_gpu);
@@ -147,6 +151,13 @@ class SharedMemory {
   // Mark the memory range as updated and protect it.
   void MakeRangeValid(uint32_t start, uint32_t length, bool written_by_gpu);
 
+  // Whether any page in the ranges lost validity since the current GPU
+  // submission opened. Pages that were never invalidated while the submission
+  // was recording can't have been legitimately read by an already-recorded
+  // command, so their upload may be reordered to the submission start.
+  bool AnyPageInvalidatedSinceSubmissionOpen(
+      const std::pair<uint32_t, uint32_t>* page_ranges, uint32_t count) const;
+
   // Uploads a range of host pages - only called if host GPU sparse memory
   // allocation succeeded if needed. While uploading, MakeRangeValid must be
   // called for each successfully uploaded range as early as possible, before
@@ -223,6 +234,9 @@ class SharedMemory {
 
   uint64_t* system_page_flags_valid_ = nullptr;
   uint64_t* system_page_flags_valid_and_gpu_written_ = nullptr;
+  // Pages invalidated since the current GPU submission opened - cleared by
+  // OnGpuSubmissionOpened.
+  uint64_t* system_page_flags_invalidated_in_submission_ = nullptr;
 
   // Set when GPU-written flags change, so an unchanged frame skips the copy.
   bool gpu_written_data_dirty_ = false;

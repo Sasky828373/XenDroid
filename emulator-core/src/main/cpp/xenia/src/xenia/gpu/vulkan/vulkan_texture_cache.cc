@@ -550,7 +550,7 @@ void VulkanTextureCache::BeginSubmission(uint64_t new_submission_index) {
           VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
           VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED, false);
     }
-    command_processor_.SubmitBarriers(true);
+  command_processor_.SubmitBarriers(true);
     DeferredCommandBuffer& command_buffer =
         command_processor_.deferred_command_buffer();
     // TODO(Triang3l): Find the return value for invalid texture fetch constants
@@ -1958,7 +1958,7 @@ bool VulkanTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
             offsetof(LoadConstants, host_offset),
             sizeof(load_constants.host_offset), &load_constants.host_offset);
       }
-      command_processor_.SubmitBarriers(true);
+  command_processor_.SubmitBarriers(true);
       // Debug: show dispatch info with source offset
       command_processor_.InsertDebugMarker(
           "Dispatch: guest_off=0x%X host_off=0x%X groups=%ux%ux%u",

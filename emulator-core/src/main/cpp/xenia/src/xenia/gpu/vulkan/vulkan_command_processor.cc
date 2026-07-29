@@ -182,6 +182,7 @@ VulkanCommandProcessor::VulkanCommandProcessor(
               ->vulkan_device(),
           "cp-transfer"),
       deferred_command_buffer_(*this),
+      deferred_setup_command_buffer_(*this, 64 * 1024),
       transient_descriptor_allocator_uniform_buffer_(
           static_cast<const ui::vulkan::VulkanProvider*>(
               graphics_system->provider())
@@ -1807,6 +1808,7 @@ void VulkanCommandProcessor::ShutdownContext() {
   sparse_memory_binds_.clear();
 
   deferred_command_buffer_.Reset();
+  deferred_setup_command_buffer_.Reset();
   for (const auto& command_buffer_pair : command_buffers_submitted_) {
     dfn.vkDestroyCommandPool(device, command_buffer_pair.second.pool, nullptr);
   }
@@ -6739,6 +6741,10 @@ bool VulkanCommandProcessor::BeginSubmission(bool is_guest_command) {
     // the end of the submission (when async pipeline object creation requests
     // are fulfilled).
     deferred_command_buffer_.Reset();
+    deferred_setup_command_buffer_.Reset();
+    if (shared_memory_) {
+      shared_memory_->OnGpuSubmissionOpened();
+    }
 
     // Reset cached state of the command buffer.
     dynamic_viewport_update_needed_ = true;
@@ -7076,6 +7082,19 @@ bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
     // at replay drop their draws. Also persists the driver pipeline cache
     // (throttled) and flushes the shader/pipeline storage files.
     pipeline_cache_->EndSubmission();
+    if (!deferred_setup_command_buffer_.empty()) {
+      deferred_setup_command_buffer_.Execute(command_buffer.buffer);
+      VkMemoryBarrier setup_barrier;
+      setup_barrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+      setup_barrier.pNext = nullptr;
+      setup_barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+      setup_barrier.dstAccessMask =
+          VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
+      dfn.vkCmdPipelineBarrier(
+          command_buffer.buffer, VK_PIPELINE_STAGE_TRANSFER_BIT,
+          VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 1, &setup_barrier, 0, nullptr,
+          0, nullptr);
+    }
     deferred_command_buffer_.Execute(command_buffer.buffer);
 
     // Record ZPD resolves before submitting.

@@ -46,6 +46,12 @@ DEFINE_bool(
     "Vulkan");
 
 DEFINE_bool(
+    vulkan_normalize_dontcare_keys, true,
+    "Keep the loadOp discard bits out of framebuffer and pipeline cache keys "
+    "under dynamic rendering, so toggling them cannot force a render pass "
+    "break. Disable for A/B measurement of the break count.",
+    "Vulkan");
+DEFINE_bool(
     vulkan_in_pass_resolve, false,
     "Prepare color attachments for in-pass EDRAM resolves with "
     "VK_KHR_dynamic_rendering_local_read: RENDERING_LOCAL_READ image layout "
@@ -377,6 +383,8 @@ bool VulkanRenderTargetCache::Initialize(uint32_t shared_memory_binding_count) {
   const ui::vulkan::VulkanDevice::Properties& device_properties =
       vulkan_device->properties();
 
+  use_dynamic_rendering_ =
+      cvars::vulkan_dynamic_rendering && device_properties.dynamicRendering;
   local_read_attachments_ =
       cvars::vulkan_in_pass_resolve && cvars::vulkan_dynamic_rendering &&
       device_properties.dynamicRendering &&
@@ -4153,7 +4161,7 @@ VulkanRenderTargetCache::GetHostRenderTargetsFramebuffer(
     RenderPassKey render_pass_key, uint32_t pitch_tiles_at_32bpp,
     const RenderTarget* const* depth_and_color_render_targets) {
   FramebufferKey key;
-  key.render_pass_key = render_pass_key;
+  key.render_pass_key = NormalizeKeyForCacheLookup(render_pass_key);
   key.pitch_tiles_at_32bpp = pitch_tiles_at_32bpp;
   if (render_pass_key.depth_and_color_used & (1 << 0)) {
     key.depth_base_tiles = depth_and_color_render_targets[0]->key().base_tiles;
@@ -7840,7 +7848,7 @@ void VulkanRenderTargetCache::PerformTransfersAndResolveClears(
                   VK_STENCIL_FACE_FRONT_AND_BACK, transfer_stencil_bit);
             }
             command_buffer.CmdVkDraw(transfer_vertex_count, 1, 0, 0);
-          }
+                    }
         }
       }
     }

@@ -48,6 +48,8 @@
 #include "xenia/ui/vulkan/vulkan_provider.h"
 #include "xenia/ui/vulkan/vulkan_upload_buffer_pool.h"
 
+DECLARE_bool(log_gpu_frame_time_breakdown);
+
 namespace xe {
 namespace gpu {
 namespace vulkan {

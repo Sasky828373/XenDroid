@@ -27,6 +27,7 @@
 #include "xenia/ui/vulkan/vulkan_upload_buffer_pool.h"
 
 DECLARE_bool(vulkan_depth_unorm24);
+DECLARE_bool(vulkan_normalize_dontcare_keys);
 
 namespace xe {
 namespace gpu {
@@ -136,6 +137,18 @@ class VulkanRenderTargetCache final : public RenderTargetCache {
               reg::RB_DEPTHCONTROL normalized_depth_control,
               uint32_t normalized_color_mask,
               const Shader& vertex_shader) override;
+  // depth_and_color_load_dont_care only selects loadOp - it is not part of
+  // what a framebuffer or pipeline IS. Strip it from cache keys, or toggling
+  // a discard bit yields a different Framebuffer* and the pointer-identity
+  // check ends the pass for nothing. The bits stay in
+  // last_update_render_pass_key_, so real pass begins keep their DONT_CARE.
+  RenderPassKey NormalizeKeyForCacheLookup(RenderPassKey key) const {
+    if (cvars::vulkan_normalize_dontcare_keys && use_dynamic_rendering_) {
+      key.depth_and_color_load_dont_care = 0;
+    }
+    return key;
+  }
+
   // Binding information for the last successful update.
   RenderPassKey last_update_render_pass_key() const {
     return last_update_render_pass_key_;
@@ -404,6 +417,7 @@ class VulkanRenderTargetCache final : public RenderTargetCache {
   const Framebuffer* last_update_framebuffer_ = VK_NULL_HANDLE;
 
   bool local_read_attachments_ = false;
+  bool use_dynamic_rendering_ = false;
   VkPipelineStageFlags color_draw_stage_mask_ =
       VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
   VkAccessFlags color_draw_access_mask_ =

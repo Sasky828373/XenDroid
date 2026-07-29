@@ -38,6 +38,9 @@ object SettingsSchema {
                 "sysmem,nolrz" to "sysmem + nolrz (LRZ off, perf diagnostic)",
                 "sysmem,noubwc" to "sysmem + noubwc (UBWC off, perf diagnostic)"),
             b("Vulkan", "vulkan_in_pass_resolve", "In-pass EDRAM resolve", true),
+            b("Vulkan", "vulkan_resolve_to_texture_promote", "Resolve-to-texture: promote", true),
+            b("Vulkan", "vulkan_resolve_to_texture", "Resolve-to-texture: store", true),
+            b("Vulkan", "vulkan_resolve_to_texture_serve", "Resolve-to-texture: skip upload", true),
             b("Vulkan", "vulkan_normalize_dontcare_keys", "Normalize discard bits out of cache keys", true),
             // Cross-draw texture/sampler descriptor-set reuse (perf). Master toggle gates reuse
             // on/off; the edge toggle (only when reuse is on) picks edge's bitmask gate vs

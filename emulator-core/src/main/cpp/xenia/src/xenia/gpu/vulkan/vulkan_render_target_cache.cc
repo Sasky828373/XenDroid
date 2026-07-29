@@ -38,7 +38,7 @@ DECLARE_bool(rt_cache_ownership_claim_memo);
 DECLARE_bool(vulkan_dynamic_rendering);
 
 DEFINE_bool(
-    vulkan_resolve_to_texture, false,
+    vulkan_resolve_to_texture, true,
     "Have the in-pass resolve also store its result straight into the promoted "
     "destination texture, so vulkan_resolve_to_texture_serve can skip the "
     "upload that would re-read the same bytes from guest memory.",

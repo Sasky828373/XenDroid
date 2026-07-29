@@ -31,14 +31,14 @@
 DECLARE_bool(tiled_shared_memory);
 
 DEFINE_bool(
-    vulkan_resolve_to_texture_serve, false,
+    vulkan_resolve_to_texture_serve, true,
     "Skip the compute upload for textures an in-pass resolve already filled "
     "this frame. This is where the round-trip upload traffic disappears; "
     "requires vulkan_resolve_to_texture_promote and vulkan_resolve_to_texture.",
     "Vulkan");
 
 DEFINE_bool(
-    vulkan_resolve_to_texture_promote, false,
+    vulkan_resolve_to_texture_promote, true,
     "Allocate textures that an in-pass resolve writes with STORAGE usage and a "
     "uint alias view, so the resolve can write them directly. Changes nothing "
     "on its own, but costs framebuffer compression on those textures.",

@@ -111,6 +111,8 @@ object SettingDescriptions {
         "vulkan_async_skip_draws" to "Drop draws whose shaders are still compiling instead of waiting; brief pop-in instead of stutter",
         "vulkan_cache_texture_descriptors" to "Reuse texture/sampler descriptor sets across unchanged draws; disable to debug texture corruption",
         "vulkan_dynamic_pipeline_state" to "Use dynamic state for cull/depth/blend to cut pipeline permutations and shader-compile stutter",
+        "vulkan_in_pass_resolve" to "Resolve EDRAM copies inside the render pass on tiled GPUs, avoiding a pass break per resolve",
+        "vulkan_normalize_dontcare_keys" to "Stop attachment-discard bits from forcing needless render pass breaks; disable only for A/B measurement",
         "vulkan_lib_path" to "Path to a custom Vulkan driver library (e.g. Turnip) to load instead of the system driver",
         "vulkan_log_debug_messages" to "Write Vulkan debug-utils messages to the emulator log instead of the system debug output",
         "vulkan_mid_frame_submission_draws" to "Submit GPU work after this many draws instead of once per frame; 0 off, too low hurts tiled GPUs",

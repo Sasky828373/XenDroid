@@ -57,6 +57,7 @@ import kotlinx.coroutines.flow.StateFlow
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.ComposeView
 import androidx.compose.ui.viewinterop.AndroidView
+import xendroid.compose.ui.disc.DiscSwapPanel
 import xendroid.compose.ui.keyboard.GuestKeyboardPanel
 import xendroid.compose.ui.theme.xendroidTheme
 import xendroid.compose.gamepad.GamepadConfigDto
@@ -81,6 +82,9 @@ class EmulatorHostActivity : ComponentActivity(), SurfaceHolder.Callback {
         private const val TAG = "EmuHost"
         private const val KEYBOARD_POLL_MS = 150L
         const val EXTRA_GAME_URI = "game_uri"   // matches GameLibraryViewModel.EXTRA_GAME_URI
+        // matches GameLibraryViewModel
+        const val EXTRA_DISC_LABELS = "disc_labels"
+        const val EXTRA_DISC_PATHS = "disc_paths"
 
         // Default Android-KeyEvent -> VirtualControl KEY_CODE map (KeyMapConfig defaults).
         // Mirrored locally: VirtualControl lives in :app, not on the :app-compose classpath.
@@ -119,6 +123,8 @@ class EmulatorHostActivity : ComponentActivity(), SurfaceHolder.Callback {
     private val menuOpenState = mutableStateOf(false)  // in-game menu (back pauses + shows Quit)
     private val keyboardRequestState =
         mutableStateOf<Emulator.KeyboardRequest?>(null) // guest text-entry prompt, if any
+    private val discRequestState =
+        mutableStateOf<Emulator.DiscSwapRequest?>(null) // guest disc-swap prompt, if any
 
     // User hardware-key bindings (Android keycode -> game KEY_CODE), loaded from
     // KeymapStore in onCreate; falls back to GameButtons.DEFAULT_LOOKUP until loaded.
@@ -337,6 +343,34 @@ class EmulatorHostActivity : ComponentActivity(), SurfaceHolder.Callback {
                             )
                         }
                     }
+
+                    // Blocks the guest thread that asked, until answered.
+                    val discRequest by discRequestState
+                    LaunchedEffect(booted) {
+                        if (!booted) return@LaunchedEffect
+                        while (isActive) {
+                            if (discRequestState.value == null) {
+                                discRequestState.value = session.discRequest()
+                            }
+                            delay(KEYBOARD_POLL_MS)
+                        }
+                    }
+                    discRequest?.let { req ->
+                        xendroidTheme {
+                            DiscSwapPanel(
+                                request = req,
+                                onChoose = { path ->
+                                    session.discSubmit(req.id, true, path)
+                                    discRequestState.value = null
+                                },
+                                onCancel = {
+                                    session.discSubmit(req.id, false, "")
+                                    discRequestState.value = null
+                                },
+                                modifier = Modifier.fillMaxSize(),
+                            )
+                        }
+                    }
                 }
 
                 // In-game menu: back / swipe-back PAUSES the game and opens a menu (Quit) instead
@@ -345,13 +379,20 @@ class EmulatorHostActivity : ComponentActivity(), SurfaceHolder.Callback {
                 // Back cancels a text prompt instead of opening the menu. The gate below
                 // is what gives it priority; without it back pauses behind the prompt.
                 val keyboardOpen = keyboardRequestState.value != null
+                val discOpen = discRequestState.value != null
                 BackHandler(enabled = keyboardOpen) {
                     keyboardRequestState.value?.let { req ->
                         session.keyboardSubmit(req.id, false, "")
                         keyboardRequestState.value = null
                     }
                 }
-                BackHandler(enabled = !menuOpen && !keyboardOpen) {
+                BackHandler(enabled = discOpen) {
+                    discRequestState.value?.let { req ->
+                        session.discSubmit(req.id, false, "")
+                        discRequestState.value = null
+                    }
+                }
+                BackHandler(enabled = !menuOpen && !keyboardOpen && !discOpen) {
                     menuOpenState.value = true
                     if (session.booted) session.pause()
                 }
@@ -392,6 +433,11 @@ class EmulatorHostActivity : ComponentActivity(), SurfaceHolder.Callback {
             started = true
             session.attachSurface(holder.surface)
             try {
+                val labels = intent.getStringArrayExtra(EXTRA_DISC_LABELS)
+                val paths = intent.getStringArrayExtra(EXTRA_DISC_PATHS)
+                if (labels != null && paths != null && labels.isNotEmpty()) {
+                    session.discSetKnown(labels.toList(), paths.toList())
+                }
                 session.bootOnce()
                 bootedState.value = true                  // reveal the SP4 overlay post-boot
             } catch (t: RuntimeException) {
@@ -456,6 +502,8 @@ class EmulatorHostActivity : ComponentActivity(), SurfaceHolder.Callback {
         // A pending prompt must not hold a dispatch thread through teardown.
         keyboardRequestState.value = null
         session.keyboardCancelAll()
+        discRequestState.value = null
+        session.discCancelAll()
         // Hard-kill via SIGKILL (single-shot core). killProcess skips the C++ atexit
         // static-destructor path that System.exit(0) ran, which can deadlock joining a
         // paused audio worker and wedge :emu instead of closing it.

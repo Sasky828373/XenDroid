@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: WTFPL
 #include "emulator_xendroid.h"
 #include "xendroid_emu.h"
+#include "xe_android_disc_swap.h"
 #include "xe_android_text_input.h"
 
 #include <atomic>   // single-xe::Memory-per-process guard in extract_xex_meta
@@ -162,7 +163,9 @@ static jstring j_simple_device_info(JNIEnv* env, jobject thiz)
 // NOTE: the xex2_* structs live in namespace xe (xex2_info.h), while XexModule /
 // kXEX*Signature live in xe::cpu (xex_module.h).
 static bool read_xex_title_id(const uint8_t* data, size_t size, uint32_t* out,
-                              uint32_t* media_id_out = nullptr) {
+                              uint32_t* media_id_out = nullptr,
+                              uint32_t* disc_number_out = nullptr,
+                              uint32_t* disc_count_out = nullptr) {
     using namespace xe;            // xex2_header, xex2_opt_*, XEX_HEADER_EXECUTION_INFO
     using namespace xe::cpu;       // XexModule, kXEX2Signature, kXEX1Signature
 
@@ -192,6 +195,9 @@ static bool read_xex_title_id(const uint8_t* data, size_t size, uint32_t* out,
     auto* exec_info = reinterpret_cast<const xex2_opt_execution_info*>(p);
     *out = exec_info->title_id.get();
     if (media_id_out) *media_id_out = exec_info->media_id.get();
+    // Raw uint8_t, 1-based, 0 = not stated.
+    if (disc_number_out) *disc_number_out = exec_info->disc_number;
+    if (disc_count_out) *disc_count_out = exec_info->disc_count;
     return true;
 }
 
@@ -201,6 +207,8 @@ struct XexMeta {
     std::vector<uint8_t> icon;   // empty if absent / unreadable
     uint32_t title_id = 0;       // 0 if unreadable
     uint32_t media_id = 0;       // 0 if unreadable
+    uint32_t disc_number = 0;    // 1-based; 0 if not stated
+    uint32_t disc_count = 0;     // 0 if not stated
 };
 
 // Lightweight, allocation-free structural validation that accepts only well-formed,
@@ -383,10 +391,15 @@ static XexMeta extract_xex_meta(const uint8_t* base, size_t size) {
     // Pull the title id straight from the header (reuse read_xex_title_id).
     uint32_t title_id = 0;
     uint32_t media_id = 0;
-    if (!read_xex_title_id(base, size, &title_id, &media_id) || title_id == 0)
+    uint32_t disc_number = 0, disc_count = 0;
+    if (!read_xex_title_id(base, size, &title_id, &media_id, &disc_number,
+                           &disc_count) ||
+        title_id == 0)
         return out;
     out.title_id = title_id;                                   // capture (free)
     out.media_id = media_id;
+    out.disc_number = disc_number;
+    out.disc_count = disc_count;
     const std::string res_name = fmt::format("{:08X}", title_id);  // exactly 8 chars
 
     uint32_t res_addr = 0, res_size = 0;
@@ -579,6 +592,8 @@ static jobject j_meta_from_path(JNIEnv* env, jobject self,
         if (hdr) {
             meta.title_id = hdr->title_id;
             meta.media_id = hdr->media_id;
+            meta.disc_number = hdr->disc_number;
+            meta.disc_count = hdr->disc_count;
         }
     }
 
@@ -593,6 +608,8 @@ static jobject j_meta_from_path(JNIEnv* env, jobject self,
     jfieldID fid_uri = env->GetFieldID(cls, "uri", "Ljava/lang/String;");
     jfieldID fid_title_id = env->GetFieldID(cls, "titleId", "Ljava/lang/String;");
     jfieldID fid_media_id = env->GetFieldID(cls, "mediaId", "Ljava/lang/String;");
+    jfieldID fid_disc_number = env->GetFieldID(cls, "discNumber", "I");
+    jfieldID fid_disc_count = env->GetFieldID(cls, "discCount", "I");
     jfieldID fid_icon = env->GetFieldID(cls, "icon", "[B");
 
     jobject game_info = env->NewObject(cls, ctor);
@@ -613,6 +630,8 @@ static jobject j_meta_from_path(JNIEnv* env, jobject self,
 
     env->SetObjectField(game_info, fid_media_id,
                         make_media_id_jstring(env, meta.media_id != 0, meta.media_id));
+    env->SetIntField(game_info, fid_disc_number, (jint)meta.disc_number);
+    env->SetIntField(game_info, fid_disc_count, (jint)meta.disc_count);
 
     // ICON: PNG bytes, or leave null.
     if (!meta.icon.empty()) {
@@ -648,6 +667,8 @@ static jobject j_meta_info_from_god_path(JNIEnv* env, jobject self,
     jfieldID fid_uri = env->GetFieldID(cls, "uri", "Ljava/lang/String;");
     jfieldID fid_title_id = env->GetFieldID(cls, "titleId", "Ljava/lang/String;");
     jfieldID fid_media_id = env->GetFieldID(cls, "mediaId", "Ljava/lang/String;");
+    jfieldID fid_disc_number = env->GetFieldID(cls, "discNumber", "I");
+    jfieldID fid_disc_count = env->GetFieldID(cls, "discCount", "I");
     jfieldID fid_icon = env->GetFieldID(cls, "icon", "[B");
 
     jobject game_info = env->NewObject(cls, ctor);
@@ -666,6 +687,8 @@ static jobject j_meta_info_from_god_path(JNIEnv* env, jobject self,
 
     env->SetObjectField(game_info, fid_media_id,
                         make_media_id_jstring(env, meta->media_id != 0, meta->media_id));
+    env->SetIntField(game_info, fid_disc_number, (jint)meta->disc_number);
+    env->SetIntField(game_info, fid_disc_count, (jint)meta->disc_count);
 
     // ICON: embedded title_thumbnail PNG, or leave null.
     if (!meta->icon_data.empty()) {
@@ -1515,6 +1538,100 @@ static void j_keyboard_cancel_all(JNIEnv* env, jobject self) {
 #endif
 }
 
+static jobject j_disc_request(JNIEnv* env, jobject self) {
+#if XE_PLATFORM_xendroid
+    xendroid::PendingDiscSwap req;
+    if (!xendroid::PeekDiscSwapRequest(req)) return nullptr;
+
+    jclass cls = env->FindClass("xendroid/compose/Emulator$DiscSwapRequest");
+    if (!cls) return nullptr;
+    jmethodID ctor = env->GetMethodID(cls, "<init>", "()V");
+    jobject o = env->NewObject(cls, ctor);
+    if (!o) return nullptr;
+
+    // UTF-16: the modified-UTF-8 accessors mangle guest strings.
+    auto set_string = [&](const char* field, const std::string& utf8) {
+        std::u16string u16 = xe::to_utf16(utf8);
+        jstring v = env->NewString(reinterpret_cast<const jchar*>(u16.data()),
+                                   (jsize)u16.size());
+        env->SetObjectField(o, env->GetFieldID(cls, field, "Ljava/lang/String;"), v);
+        env->DeleteLocalRef(v);
+    };
+    auto set_array = [&](const char* field, const std::vector<std::string>& in) {
+        jclass string_cls = env->FindClass("java/lang/String");
+        jobjectArray arr = env->NewObjectArray((jsize)in.size(), string_cls, nullptr);
+        for (size_t i = 0; i < in.size(); ++i) {
+            std::u16string u16 = xe::to_utf16(in[i]);
+            jstring v = env->NewString(reinterpret_cast<const jchar*>(u16.data()),
+                                       (jsize)u16.size());
+            env->SetObjectArrayElement(arr, (jsize)i, v);
+            env->DeleteLocalRef(v);
+        }
+        env->SetObjectField(o, env->GetFieldID(cls, field, "[Ljava/lang/String;"), arr);
+        env->DeleteLocalRef(arr);
+    };
+
+    env->SetLongField(o, env->GetFieldID(cls, "id", "J"), (jlong)req.id);
+    set_string("message", req.message);
+    env->SetBooleanField(o, env->GetFieldID(cls, "isError", "Z"),
+                         req.is_error ? JNI_TRUE : JNI_FALSE);
+    env->SetIntField(o, env->GetFieldID(cls, "discNumber", "I"),
+                     (jint)req.disc_number);
+    set_array("discLabels", req.disc_labels);
+    set_array("discPaths", req.disc_paths);
+    return o;
+#else
+    return nullptr;
+#endif
+}
+
+static void j_disc_submit(JNIEnv* env, jobject self, jlong id,
+                          jboolean accepted, jstring path) {
+#if XE_PLATFORM_xendroid
+    std::string utf8;
+    if (path) {
+        const jchar* chars = env->GetStringChars(path, nullptr);
+        jsize count = env->GetStringLength(path);
+        if (chars) {
+            utf8 = xe::to_utf8(std::u16string_view(
+                    reinterpret_cast<const char16_t*>(chars), (size_t)count));
+            env->ReleaseStringChars(path, chars);
+        }
+    }
+    xendroid::SubmitDiscSwap((uint64_t)id, accepted == JNI_TRUE, utf8);
+#endif
+}
+
+static void j_disc_cancel_all(JNIEnv* env, jobject self) {
+#if XE_PLATFORM_xendroid
+    xendroid::CancelAllDiscSwap();
+#endif
+}
+
+static void j_disc_set_known(JNIEnv* env, jobject self, jobjectArray labels,
+                             jobjectArray paths) {
+#if XE_PLATFORM_xendroid
+    auto read = [&](jobjectArray arr) {
+        std::vector<std::string> out;
+        if (!arr) return out;
+        jsize n = env->GetArrayLength(arr);
+        for (jsize i = 0; i < n; ++i) {
+            auto v = (jstring)env->GetObjectArrayElement(arr, i);
+            if (!v) { out.emplace_back(); continue; }
+            const jchar* chars = env->GetStringChars(v, nullptr);
+            jsize count = env->GetStringLength(v);
+            out.push_back(chars ? xe::to_utf8(std::u16string_view(
+                    reinterpret_cast<const char16_t*>(chars), (size_t)count))
+                                : std::string());
+            if (chars) env->ReleaseStringChars(v, chars);
+            env->DeleteLocalRef(v);
+        }
+        return out;
+    };
+    xendroid::SetKnownDiscs(read(labels), read(paths));
+#endif
+}
+
 int register_xendroid_Emulator(JNIEnv* env){
 
     g_class_Emulator = env->FindClass("xendroid/compose/Emulator");
@@ -1547,6 +1664,10 @@ int register_xendroid_Emulator(JNIEnv* env){
             ,{"keyboard_request", "()Lxendroid/compose/Emulator$KeyboardRequest;", (void *) j_keyboard_request}
             ,{"keyboard_submit", "(JZLjava/lang/String;)V", (void *) j_keyboard_submit}
             ,{"keyboard_cancel_all", "()V", (void *) j_keyboard_cancel_all}
+            ,{"disc_request", "()Lxendroid/compose/Emulator$DiscSwapRequest;", (void *) j_disc_request}
+            ,{"disc_submit", "(JZLjava/lang/String;)V", (void *) j_disc_submit}
+            ,{"disc_cancel_all", "()V", (void *) j_disc_cancel_all}
+            ,{"disc_set_known", "([Ljava/lang/String;[Ljava/lang/String;)V", (void *) j_disc_set_known}
     };
     return env->RegisterNatives(g_class_Emulator,methods, sizeof(methods)/sizeof(methods[0]));
 }

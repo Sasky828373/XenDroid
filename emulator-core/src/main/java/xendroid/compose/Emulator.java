@@ -99,6 +99,12 @@ public class Emulator extends xendroid.emulator.Emulator{
     // Fail every waiting request.
     public native void keyboard_cancel_all();
 
+    public native DiscSwapRequest disc_request();
+    public native void disc_submit(long id, boolean accepted, String path);
+    public native void disc_cancel_all();
+    /** Discs the host offers for this title; set before boot. */
+    public native void disc_set_known(String[] labels, String[] paths);
+
     // ---- Real-path (All Files Access) scan probes: take an ABSOLUTE host path
     // (no Context: no ContentResolver / fd). The core's real-path DiscImageDevice /
     // DiscZarchiveDevice / Extract*Metadata back these. format: 0=ISO, 1=XEX_FOLDER,
@@ -126,6 +132,8 @@ public class Emulator extends xendroid.emulator.Emulator{
         public String name;
         public String titleId;   // 8-char uppercase hex, or null for non-GOD / unreadable
         public String mediaId;   // 8-char uppercase hex, or null when unreadable
+        public int discNumber;   // 1-based; 0 when the header does not state it
+        public int discCount;    // 0 when the header does not state it
         public int fd;
         public byte[] icon;
 
@@ -195,5 +203,15 @@ public class Emulator extends xendroid.emulator.Emulator{
         public String defaultText; // clamped to maxLength
         public int maxLength;      // UTF-16 code units, terminator excluded
         public int flags;          // raw guest flags
+    }
+
+    /** A pending guest disc-swap prompt. */
+    public static class DiscSwapRequest {
+        public long id;              // stale ids are ignored
+        public String message;       // the guest's instruction text
+        public boolean isError;      // a retry after a rejected disc
+        public int discNumber;       // the disc the guest asked for, 1-based
+        public String[] discLabels;  // parallel to discPaths
+        public String[] discPaths;   // absolute host paths
     }
 }

@@ -36,6 +36,7 @@ target_sources(emu
         emulator_xendroid.cpp
         xe_aaudio_audio_driver.cpp
         xe_aaudio_audio_system.cpp
+        xe_android_disc_swap.cpp
         xe_android_hid.cpp
         xe_android_input_driver.cpp
         xe_android_text_input.cpp

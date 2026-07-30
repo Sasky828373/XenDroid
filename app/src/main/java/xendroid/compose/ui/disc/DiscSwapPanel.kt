@@ -93,7 +93,7 @@ fun DiscSwapPanel(
 
                     if (count == 0) {
                         Text(
-                            "No other discs for this title were found in the games folder.",
+                            "No discs for this title were found in the games folder.",
                             style = MaterialTheme.typography.bodyMedium,
                             modifier = Modifier.padding(top = if (compact) 8.dp else 16.dp),
                         )

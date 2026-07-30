@@ -137,20 +137,21 @@ class GameLibraryViewModel(
             setPackage(appContext.packageName)          // self; host is in this app
             putExtra(EXTRA_GAME_URI, game.launchUri)
             // :emu cannot read the library, so the discs travel with the launch.
-            val siblings = otherDiscsOf(game)
-            putExtra(EXTRA_DISC_LABELS, siblings.map { discLabelOf(it) }.toTypedArray())
-            putExtra(EXTRA_DISC_PATHS, siblings.map { it.launchUri }.toTypedArray())
+            val discs = discsOfTitle(game)
+            putExtra(EXTRA_DISC_LABELS, discs.map { discLabelOf(it) }.toTypedArray())
+            putExtra(EXTRA_DISC_PATHS, discs.map { it.launchUri }.toTypedArray())
         }
 
-    /** The other discs of [game]'s title. Matched on title id, which a set shares;
-     *  STFS is excluded because updates and DLC share it too without being discs. */
-    fun otherDiscsOf(game: Game): List<Game> {
+    /** Every disc of [game]'s title, including the one being launched: after a swap
+     *  the launched disc becomes a swap target again (install disc -> play disc).
+     *  Matched on title id, which a set shares; STFS is excluded because updates
+     *  and DLC share it too without being discs. */
+    fun discsOfTitle(game: Game): List<Game> {
         val titleId = game.titleId?.takeIf { it.isNotBlank() && it != "00000000" }
             ?: return emptyList()
         val all = (_state.value as? LibraryUiState.Loaded)?.games ?: return emptyList()
         return all.filter {
-            it.launchUri != game.launchUri &&
-                it.format != GameFormat.STFS &&
+            it.format != GameFormat.STFS &&
                 it.titleId?.equals(titleId, ignoreCase = true) == true
         }.sortedWith(compareBy({ if (it.discNumber > 0) it.discNumber else Int.MAX_VALUE },
                                 { it.name.lowercase() }))

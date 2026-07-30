@@ -104,6 +104,8 @@ class GameLibraryRepository(
         val iconCacheName: String?,
         val titleId: String?,
         val mediaId: String?,
+        val discNumber: Int = 0,
+        val discCount: Int = 0,
     )
 
     /** Shared cache wrapper for the always-producing extracting branches (ISO, XEX_FOLDER,
@@ -116,11 +118,14 @@ class GameLibraryRepository(
         extract: () -> Extracted,
     ): Game {
         metadataCacheHit(launchUri, signature)?.let {
-            return Game(launchUri, it.name, format, it.iconCacheName, it.titleId, it.mediaId)
+            return Game(launchUri, it.name, format, it.iconCacheName, it.titleId, it.mediaId,
+                        it.discNumber, it.discCount)
         }
-        val (name, iconName, titleId, mediaId) = extract()
-        metadataCache.put(launchUri, name, iconName, signature, titleId, mediaId)
-        return Game(launchUri, name, format, iconName, titleId, mediaId)
+        val e = extract()
+        metadataCache.put(launchUri, e.name, e.iconCacheName, signature, e.titleId, e.mediaId,
+                          format, e.discNumber, e.discCount)
+        return Game(launchUri, e.name, format, e.iconCacheName, e.titleId, e.mediaId,
+                    e.discNumber, e.discCount)
     }
 
     // ---- Real-path (All Files Access) scan: a java.io.File walk using real paths + the
@@ -160,7 +165,8 @@ class GameLibraryRepository(
                 val meta = metadata.readXexMetaPath(xexPath, GameFormat.XEX_FOLDER)
                 val displayName = meta?.name?.takeIf { it.isNotEmpty() } ?: name
                 val iconName = meta?.iconPng?.let { iconCache.write(xexPath, it) }
-                Extracted(displayName, iconName, meta?.titleId, meta?.mediaId)
+                Extracted(displayName, iconName, meta?.titleId, meta?.mediaId,
+                          meta?.discNumber ?: 0, meta?.discCount ?: 0)
             }
         }
         return when (GameFormat.fromFileName(name)) {
@@ -172,7 +178,8 @@ class GameLibraryRepository(
                     val displayName = meta?.name?.takeIf { it.isNotEmpty() }
                         ?: fmt.displayNameFor(name)
                     val iconName = meta?.iconPng?.let { iconCache.write(path, it) }
-                    Extracted(displayName, iconName, meta?.titleId, meta?.mediaId)
+                    Extracted(displayName, iconName, meta?.titleId, meta?.mediaId,
+                          meta?.discNumber ?: 0, meta?.discCount ?: 0)
                 }
             }
             GameFormat.GOD -> classifyExtensionless(child, name)
@@ -188,13 +195,16 @@ class GameLibraryRepository(
         val path = child.absolutePath
         metadataCacheHit(path, signatureOf(child))?.let { hit ->
             val fmt = hit.format ?: GameFormat.GOD   // legacy entries predate STFS -> GOD
-            return Game(path, hit.name, fmt, hit.iconCacheName, hit.titleId, hit.mediaId)
+            return Game(path, hit.name, fmt, hit.iconCacheName, hit.titleId, hit.mediaId,
+                        hit.discNumber, hit.discCount)
         }
         metadata.readGodPath(path)?.let { meta ->
             val displayName = meta.name.ifEmpty { name }
             val iconName = meta.iconPng?.let { iconCache.write(path, it) }
-            metadataCache.put(path, displayName, iconName, signatureOf(child), meta.titleId, meta.mediaId, GameFormat.GOD)
-            return Game(path, displayName, GameFormat.GOD, iconName, meta.titleId, meta.mediaId)
+            metadataCache.put(path, displayName, iconName, signatureOf(child), meta.titleId, meta.mediaId,
+                              GameFormat.GOD, meta.discNumber, meta.discCount)
+            return Game(path, displayName, GameFormat.GOD, iconName, meta.titleId, meta.mediaId,
+                        meta.discNumber, meta.discCount)
         }
         // GOD MUST be probed first (above): a GOD container also parses as a content
         // package, so reaching here only after readGodPath fails keeps GOD out of this

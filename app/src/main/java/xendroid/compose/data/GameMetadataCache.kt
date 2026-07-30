@@ -36,6 +36,8 @@ class GameMetadataCache(cacheDir: File) {
         // Extensionless files share one branch (GOD vs STFS); a null format is a legacy
         // entry that predates STFS and is GOD by construction.
         val format: GameFormat? = null,
+        val discNumber: Int = 0,
+        val discCount: Int = 0,
     )
 
     @Serializable
@@ -69,11 +71,14 @@ class GameMetadataCache(cacheDir: File) {
         titleId: String? = null,
         mediaId: String? = null,
         format: GameFormat? = null,
+        discNumber: Int = 0,
+        discCount: Int = 0,
     ) {
         if (!signature.cacheable) return
         synchronized(lock) {
             entries[launchUri] =
-                Entry(name, iconCacheName, signature.sizeBytes, signature.lastModified, titleId, mediaId, format)
+                Entry(name, iconCacheName, signature.sizeBytes, signature.lastModified, titleId, mediaId,
+                      format, discNumber, discCount)
         }
     }
 
@@ -119,7 +124,7 @@ class GameMetadataCache(cacheDir: File) {
 
     companion object {
         private const val TAG = "GameMetadataCache"
-        const val FILE_NAME = "game_metadata_v3.json"
+        const val FILE_NAME = "game_metadata_v4.json"
 
         /**
          * PURE, side-effect-free HIT/MISS decision (no SAF/JNI/IO) so it is unit-testable.
@@ -146,7 +151,8 @@ class GameMetadataCache(cacheDir: File) {
             }
             val icon = cached.iconCacheName
             if (icon != null && !iconFileExists(icon)) return Decision.Miss
-            return Decision.Hit(cached.name, cached.iconCacheName, cached.titleId, cached.mediaId, cached.format)
+            return Decision.Hit(cached.name, cached.iconCacheName, cached.titleId, cached.mediaId,
+                                cached.format, cached.discNumber, cached.discCount)
         }
     }
 
@@ -159,6 +165,8 @@ class GameMetadataCache(cacheDir: File) {
             val titleId: String? = null,
             val mediaId: String? = null,
             val format: GameFormat? = null,
+            val discNumber: Int = 0,
+            val discCount: Int = 0,
         ) : Decision
     }
 }

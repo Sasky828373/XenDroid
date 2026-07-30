@@ -286,6 +286,13 @@ fun GameLibraryScreen(
                 ListItem(
                     headlineContent = {
                         Text(game.name, style = MaterialTheme.typography.titleLarge)
+                        if (game.isMultiDisc) {
+                            Text(
+                                "Disc ${game.discNumber} of ${game.discCount}",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
                     },
                     supportingContent = if (game.titleId != null || game.mediaId != null || statusContent != null) {
                         {
@@ -506,6 +513,15 @@ private fun GameCell(
             maxLines = 2,
             overflow = TextOverflow.Ellipsis,
         )
+        // A set shares one title, so the tiles would otherwise be identical.
+        if (game.isMultiDisc) {
+            Text(
+                "Disc ${game.discNumber} of ${game.discCount}",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+            )
+        }
     }
 }
 

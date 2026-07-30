@@ -399,8 +399,16 @@ class Emulator {
     }
   }
 
-  // The game can request another title to be loaded.
-  const std::filesystem::path GetNewDiscPath(std::string window_message = "");
+  // The game can request another title to be loaded. requested_disc_number is
+  // passed through only so a host panel can name the disc.
+  const std::filesystem::path GetNewDiscPath(std::string window_message = "",
+                                             uint32_t requested_disc_number = 0);
+
+  // Which disc is mounted now; the boot XEX header is never rewritten.
+  uint32_t current_disc_number() const { return current_disc_number_; }
+  void set_current_disc_number(uint32_t disc_number) {
+    current_disc_number_ = disc_number;
+  }
 
   void WaitUntilExit();
 
@@ -461,6 +469,7 @@ class Emulator {
   std::filesystem::path command_line_;
   std::filesystem::path last_launch_path_;  // persists across relaunch
   DiscProvider disc_provider_;
+  uint32_t current_disc_number_ = 0;
   DiscRecorder disc_recorder_;
   std::filesystem::path storage_root_;
   std::filesystem::path content_root_;

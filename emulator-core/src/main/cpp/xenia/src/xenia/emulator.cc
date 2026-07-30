@@ -55,6 +55,7 @@
 #include "xenia/kernel/xthread.h"
 #include "xenia/memory.h"
 #include "xenia/ui/file_picker.h"
+#include "xenia/ui/host_disc_swap.h"
 #include "xenia/ui/imgui_dialog.h"
 #include "xenia/ui/imgui_drawer.h"
 #include "xenia/ui/imgui_host_notification.h"
@@ -1840,7 +1841,7 @@ void Emulator::MountStandardDrives() {
 }
 
 const std::filesystem::path Emulator::GetNewDiscPath(
-    std::string window_message) {
+    std::string window_message, uint32_t requested_disc_number) {
   std::filesystem::path path = "";
 
   uint32_t current_title_id = !title_id_.has_value() ? 0 : title_id_.value();
@@ -1878,6 +1879,27 @@ const std::filesystem::path Emulator::GetNewDiscPath(
   // Check if we need to show the disc selection dialog
   bool show_error = window_message.find("ERROR:") != std::string::npos;
   bool use_file_picker = false;
+
+  // Takes precedence: the ImGui dialog below cannot be dismissed on platforms
+  // that never dispatch input into ui::Window.
+  if (ui::HasHostDiscSwapProvider()) {
+    ui::HostDiscSwapRequest request;
+    // Hand the kernel's "ERROR:" retry marker over as a flag.
+    request.is_error = show_error;
+    request.message = show_error ? window_message.substr(
+                                       window_message.find("ERROR:"))
+                                 : window_message;
+    request.disc_number = requested_disc_number;
+    for (const auto& disc : saved_discs) {
+      request.discs.push_back({disc.label, disc.path});
+    }
+    ui::HostDiscSwapResult result;
+    if (ui::RequestHostDiscSwap(request, result) && result.accepted &&
+        !result.path_utf8.empty()) {
+      return xe::to_path(result.path_utf8);
+    }
+    return "";
+  }
 
   if (display_window_ && imgui_drawer_ &&
       (saved_discs.size() > 1 || show_error)) {

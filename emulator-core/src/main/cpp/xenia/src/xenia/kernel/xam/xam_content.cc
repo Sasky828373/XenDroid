@@ -30,6 +30,8 @@
 #include "xenia/ui/imgui_drawer.h"
 #include "xenia/vfs/devices/stfs_xbox.h"
 #include "xenia/vfs/devices/xcontent_container_device.h"
+#include "xenia/vfs/iso_metadata.h"
+#include "xenia/vfs/zar_metadata.h"
 #include "xenia/xbox.h"
 
 DECLARE_bool(in_process_title_relaunch);
@@ -698,8 +700,23 @@ dword_result_t XamSwapDisc_entry(
     dword_t disc_number, pointer_t<X_KEVENT> completion_handle,
     pointer_t<X_SWAPDISC_ERROR_MESSAGE> error_message) {
   xex2_opt_execution_info* info = nullptr;
-  kernel_state()->GetExecutableModule()->GetOptHeader(XEX_HEADER_EXECUTION_INFO,
-                                                      &info);
+  if (kernel_state()->GetExecutableModule()->GetOptHeader(
+          XEX_HEADER_EXECUTION_INFO, &info) != X_STATUS_SUCCESS ||
+      !info) {
+    XELOGE("XamSwapDisc: title has no execution info header");
+    return X_ERROR_INVALID_PARAMETER;
+  }
+  if (!completion_handle || !error_message) {
+    XELOGE("XamSwapDisc: null completion handle or error message");
+    return X_ERROR_INVALID_PARAMETER;
+  }
+
+  XELOGI(
+      "XamSwapDisc: title {:08X} requested disc {} of {} (boot disc {}) on "
+      "guest thread {:08X}",
+      uint32_t(info->title_id), uint32_t(disc_number),
+      uint8_t(info->disc_count), uint8_t(info->disc_number),
+      XThread::GetCurrentThreadId());
 
   // Validate the requested disc number
   if (disc_number < 1 || disc_number > info->disc_count) {
@@ -709,17 +726,15 @@ dword_result_t XamSwapDisc_entry(
   }
 
   auto completion_event = [completion_handle]() -> void {
-    auto kevent = xboxkrnl::xeKeSetEvent(completion_handle, 1, 0);
-
-    // Release the completion handle
-    auto object =
-        XObject::GetNativeObject<XObject>(kernel_state(), completion_handle);
-    if (object) {
-      object->Retain();
-    }
+    xboxkrnl::xeKeSetEvent(completion_handle, 1, 0);
   };
 
-  if (info->disc_number == disc_number) {
+  // info->disc_number is the BOOT disc and is never rewritten.
+  const uint32_t mounted_disc =
+      kernel_state()->emulator()->current_disc_number()
+          ? kernel_state()->emulator()->current_disc_number()
+          : uint32_t(info->disc_number);
+  if (mounted_disc == disc_number) {
     completion_event();
     return X_ERROR_SUCCESS;
   }
@@ -742,7 +757,8 @@ dword_result_t XamSwapDisc_entry(
   while (true) {
     const std::filesystem::path new_disc_path =
         kernel_state()->emulator()->GetNewDiscPath(
-            xe::to_utf8(text_message) + "\n\n" + error_dialog_message);
+            xe::to_utf8(text_message) + "\n\n" + error_dialog_message,
+            disc_number);
     XELOGI("XamSwapDisc: GetNewDiscPath returned path {}.",
            new_disc_path.string().c_str());
 
@@ -752,12 +768,11 @@ dword_result_t XamSwapDisc_entry(
     // Check if user cancelled the disc selection - don't proceed with wrong
     // disc
     if (new_disc_path.empty()) {
-      XELOGI("XamSwapDisc: User cancelled disc selection, prompting again...");
-      error_dialog_message =
-          "ERROR: Disc swap cancelled.\n\n"
-          "The game requires the correct disc to continue.\n"
-          "Please select the requested disc.";
-      continue;  // Ask again
+      // Re-prompting would spin a guest thread against an instant-returning
+      // provider. The drive stays empty, as the guest's own eject left it.
+      XELOGI("XamSwapDisc: disc selection cancelled");
+      completion_event();
+      return X_ERROR_CANCELLED;
     }
 
     // Mount the new disc
@@ -792,7 +807,7 @@ dword_result_t XamSwapDisc_entry(
         const auto& exec_info = header->content_metadata.execution_info;
 
         // Validate disc number matches what was requested
-        if (exec_info.disc_number != disc_number) {
+        if (exec_info.disc_number && exec_info.disc_number != disc_number) {
           XELOGE(
               "XamSwapDisc: Disc number mismatch! Requested disc {}, but "
               "mounted disc is disc {}.",
@@ -852,6 +867,9 @@ dword_result_t XamSwapDisc_entry(
           xam->loader_data().host_path = xe::path_to_utf8(new_disc_path);
         }
 
+        kernel_state()->emulator()->set_current_disc_number(
+            exec_info.disc_number);
+
         // Notify UI of disc swap for title bar update
         auto on_disc_swap = kernel_state()->emulator()->on_disc_swap();
         if (on_disc_swap) {
@@ -862,9 +880,36 @@ dword_result_t XamSwapDisc_entry(
         break;
       }
     } else {
-      XELOGW(
-          "XamSwapDisc: Mounted device is not an XContentContainerDevice, "
-          "skipping validation");
+      // Disc images are not containers, so the checks above skip them; without
+      // this any file is accepted as any disc.
+      auto image_meta = vfs::ExtractIsoMetadata(new_disc_path);
+      if (!image_meta) {
+        image_meta = vfs::ExtractZarMetadata(new_disc_path);
+      }
+      if (image_meta) {
+        if (image_meta->title_id != info->title_id) {
+          XELOGE("XamSwapDisc: disc belongs to title {:08X}, expected {:08X}",
+                 image_meta->title_id, uint32_t(info->title_id));
+          filesystem->UnregisterDevice(mount_path);
+          error_dialog_message =
+              "ERROR: That disc belongs to a different game.\n"
+              "Please select a disc for this title.";
+          continue;
+        }
+        if (image_meta->disc_number &&
+            image_meta->disc_number != disc_number) {
+          XELOGE("XamSwapDisc: disc {} selected, {} requested",
+                 uint32_t(image_meta->disc_number), uint32_t(disc_number));
+          filesystem->UnregisterDevice(mount_path);
+          error_dialog_message =
+              "ERROR: That is the wrong disc.\n"
+              "Please select the requested disc.";
+          continue;
+        }
+      } else {
+        XELOGW("XamSwapDisc: could not read a header from {}; accepting it",
+               new_disc_path.string());
+      }
 
       // Update the host_path in loader_data so title restarts use the new disc
       auto xam = kernel_state()->GetKernelModule<XamModule>("xam.xex");
@@ -872,7 +917,14 @@ dword_result_t XamSwapDisc_entry(
         xam->loader_data().host_path = xe::path_to_utf8(new_disc_path);
       }
 
-      // For non-container devices, accept them (backward compatibility)
+      kernel_state()->emulator()->set_current_disc_number(disc_number);
+      kernel_state()->emulator()->RecordDisc(
+          info->title_id, std::to_string(uint32_t(disc_number)),
+          new_disc_path);
+      auto on_disc_swap = kernel_state()->emulator()->on_disc_swap();
+      if (on_disc_swap) {
+        on_disc_swap(disc_number);
+      }
       break;
     }
   }

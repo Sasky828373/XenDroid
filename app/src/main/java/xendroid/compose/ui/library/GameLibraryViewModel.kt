@@ -30,6 +30,8 @@ import kotlinx.coroutines.withContext
  *  for this action; until then the Intent will not resolve (no-op resolveActivity). */
 const val ACTION_LAUNCH_GAME = "xendroid.intent.action.xendroid"
 const val EXTRA_GAME_URI = "game_uri"
+const val EXTRA_DISC_LABELS = "disc_labels"
+const val EXTRA_DISC_PATHS = "disc_paths"
 
 /** Minimum time the pull-to-refresh indicator stays up, so a fast warm-cache rescan
  *  doesn't outrun its reveal animation and leave it visually stuck. */
@@ -134,7 +136,35 @@ class GameLibraryViewModel(
         Intent(ACTION_LAUNCH_GAME).apply {
             setPackage(appContext.packageName)          // self; host is in this app
             putExtra(EXTRA_GAME_URI, game.launchUri)
+            // :emu cannot read the library, so the discs travel with the launch.
+            val discs = discsOfTitle(game)
+            putExtra(EXTRA_DISC_LABELS, discs.map { discLabelOf(it) }.toTypedArray())
+            putExtra(EXTRA_DISC_PATHS, discs.map { it.launchUri }.toTypedArray())
         }
+
+    /** Every disc of [game]'s title, including the one being launched: after a swap
+     *  the launched disc becomes a swap target again (install disc -> play disc).
+     *  Matched on title id, which a set shares; STFS is excluded because updates
+     *  and DLC share it too without being discs. */
+    fun discsOfTitle(game: Game): List<Game> {
+        val titleId = game.titleId?.takeIf { it.isNotBlank() && it != "00000000" }
+            ?: return emptyList()
+        val all = (_state.value as? LibraryUiState.Loaded)?.games ?: return emptyList()
+        return all.filter {
+            it.format != GameFormat.STFS &&
+                it.titleId?.equals(titleId, ignoreCase = true) == true
+        }.sortedWith(compareBy({ if (it.discNumber > 0) it.discNumber else Int.MAX_VALUE },
+                                { it.name.lowercase() }))
+    }
+
+    /** A set shares one XDBF title, so prefer the header's disc number and fall
+     *  back to the file name. */
+    fun discLabelOf(game: Game): String = when {
+        game.discNumber > 0 && game.discCount > 1 ->
+            "Disc ${game.discNumber} of ${game.discCount}"
+        game.discNumber > 0 -> "Disc ${game.discNumber}"
+        else -> java.io.File(game.launchUri).name
+    }
 
     /** Coil model for a game's icon: the cached PNG File when present, else the
      *  app_icon drawable resource id. Kept here so the View carries no IconCache dep. */

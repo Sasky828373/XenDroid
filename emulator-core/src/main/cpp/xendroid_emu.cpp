@@ -38,6 +38,7 @@
 
 #include "xe_android_hid.h"
 #include "xe_android_input_driver.h"
+#include "xe_android_disc_swap.h"
 #include "xe_android_text_input.h"
 #include "xe_opensles_audio_system.h"
 #include "xe_aaudio_audio_system.h"
@@ -54,6 +55,10 @@ DEFINE_string(gpu, "vulkan", "Graphics system. Use: [vulkan, null]",
 DEFINE_bool(android_soft_keyboard, true,
             "Show the Android keyboard when a game asks for text input, "
             "instead of answering the prompt with its default text.",
+            "UI");
+DEFINE_bool(android_disc_swap, true,
+            "Ask which disc to insert when a multi-disc game requests one, "
+            "instead of leaving the drive empty.",
             "UI");
 DEFINE_string(hid, "android", "Input system. Use: [android, nop]",
               "HID");
@@ -324,6 +329,12 @@ bool EmulatorApp::OnInitialize() {
     // itself with the title's own default text.
     if (cvars::android_soft_keyboard) {
         xendroid::InstallTextInputProvider();
+    }
+    // Likewise for XamSwapDisc: with no provider the ImGui dialog is drawn but
+    // can never be dismissed, because Android never dispatches input into
+    // ui::Window.
+    if (cvars::android_disc_swap) {
+        xendroid::InstallDiscSwapProvider();
     }
 
 #if XE_ARCH_AMD64 == 1

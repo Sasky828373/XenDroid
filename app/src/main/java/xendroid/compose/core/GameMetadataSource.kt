@@ -14,12 +14,14 @@ class GameMetadataSource {
 
     /** Parsed GOD header: title + raw embedded PNG bytes (may be empty []) + the
      *  8-char uppercase-hex title id (null for an unreadable container). */
-    data class GodMeta(val name: String, val iconPng: ByteArray?, val titleId: String?, val mediaId: String?)
+    data class GodMeta(val name: String, val iconPng: ByteArray?, val titleId: String?, val mediaId: String?,
+                       val discNumber: Int = 0, val discCount: Int = 0)
 
     /** Parsed boot-free XEX meta: title (may be "" -> caller uses filename fallback),
      *  raw embedded PNG bytes (null/empty -> app_icon fallback), and the 8-char
      *  uppercase-hex title id (null when unreadable / 00000000). */
-    data class XexMeta(val name: String, val iconPng: ByteArray?, val titleId: String?, val mediaId: String?)
+    data class XexMeta(val name: String, val iconPng: ByteArray?, val titleId: String?, val mediaId: String?,
+                       val discNumber: Int = 0, val discCount: Int = 0)
 
     // ---- Real-path (All Files Access) reads: call the path natives (no Context: real-path
     // devices mount directly from a path). path = the absolute host path (ISO file /
@@ -53,6 +55,8 @@ class GameMetadataSource {
                 iconPng = info.icon?.takeIf { it.isNotEmpty() },
                 titleId = info.titleId?.takeIf { it.isNotBlank() && it != "00000000" },
                 mediaId = info.mediaId?.takeIf { it.isNotBlank() && it != "00000000" },
+                discNumber = info.discNumber,
+                discCount = info.discCount,
             )
         } catch (t: RuntimeException) {
             Log.w("GameMetadataSource", "XEX meta extraction failed for $path ($format)", t)
@@ -104,6 +108,8 @@ class GameMetadataSource {
                 iconPng = icon,
                 titleId = info.titleId,
                 mediaId = info.mediaId?.takeIf { it.isNotBlank() && it != "00000000" },
+                discNumber = info.discNumber,
+                discCount = info.discCount,
             )
         } catch (t: RuntimeException) {
             Log.w("GameMetadataSource", "GOD parse failed for $path", t)

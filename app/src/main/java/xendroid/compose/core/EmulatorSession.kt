@@ -118,4 +118,21 @@ class EmulatorSession {
     fun keyboardCancelAll() {
         if (booted) core.keyboard_cancel_all()
     }
+
+    /** Blocks a guest thread until [discSubmit] answers it. */
+    fun discRequest(): Emulator.DiscSwapRequest? =
+        if (booted) core.disc_request() else null
+
+    fun discSubmit(id: Long, accepted: Boolean, path: String) {
+        if (booted) core.disc_submit(id, accepted, path)
+    }
+
+    fun discCancelAll() {
+        if (booted) core.disc_cancel_all()
+    }
+
+    /** Before boot: the guest can ask at any point after. */
+    fun discSetKnown(labels: List<String>, paths: List<String>) {
+        core.disc_set_known(labels.toTypedArray(), paths.toTypedArray())
+    }
 }

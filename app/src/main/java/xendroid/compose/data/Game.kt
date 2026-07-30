@@ -19,7 +19,13 @@ data class Game(
     val iconCacheName: String? = null,
     val titleId: String? = null,
     val mediaId: String? = null,
+    /** 1-based; 0 when the header does not state it. */
+    val discNumber: Int = 0,
+    /** 0 when the header does not state it. */
+    val discCount: Int = 0,
 ) {
+    /** Part of a multi-disc set, per its own header. */
+    val isMultiDisc: Boolean get() = discCount > 1
     /** Stable id derived from the launch uri (used for shortcut ids, list keys). */
     val stableId: String get() = launchUri
 }

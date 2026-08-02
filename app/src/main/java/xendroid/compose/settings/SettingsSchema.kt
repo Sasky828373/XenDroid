@@ -41,7 +41,6 @@ object SettingsSchema {
             b("Vulkan", "vulkan_resolve_to_texture_promote", "Resolve-to-texture: promote", true),
             b("Vulkan", "vulkan_resolve_to_texture", "Resolve-to-texture: store", true),
             b("Vulkan", "vulkan_resolve_to_texture_serve", "Resolve-to-texture: skip upload", true),
-            b("Vulkan", "vulkan_normalize_dontcare_keys", "Normalize discard bits out of cache keys", true),
             // Cross-draw texture/sampler descriptor-set reuse (perf). Master toggle gates reuse
             // on/off; the edge toggle (only when reuse is on) picks edge's bitmask gate vs
             // XenDroid's content-hash gate for A/B. Three-way: off / on+hash / on+edge.

@@ -1976,9 +1976,17 @@ bool VulkanRenderTargetCache::TryInPassResolveCopy(
   // A strip's y0 is relative to its own advanced base, so the rows implied by
   // the base delta have to be added back. Whole tile rows, so the byte delta
   // is linear in rows.
+  // Bytes per texel of the DESTINATION, which need not match the source render
+  // target: a 64bpp source can resolve into a 32bpp destination and vice versa,
+  // and 8 and 16bpp destinations exist too.
+  const uint32_t dest_bytes_per_texel =
+      FormatInfo::Get(
+          xenos::TextureFormat(resolve_info.copy_dest_info.copy_dest_format))
+          ->bits_per_pixel >>
+      3;
   uint32_t dest_row_bytes =
       (resolve_info.copy_dest_coordinate_info.pitch_aligned_div_32 << 5) *
-      (is_64bpp ? 8u : 4u);
+      dest_bytes_per_texel;
   int32_t dest_delta_rows =
       dest_row_bytes ? int32_t(resolve_dest_base_delta / dest_row_bytes) : 0;
   push_constants.texture_origin[1] =

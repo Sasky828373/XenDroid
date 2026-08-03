@@ -1866,6 +1866,44 @@ bool VulkanRenderTargetCache::TryInPassResolveCopy(
                 resolve_info.copy_dest_base_unadjusted & 0x1FFFFFFF,
                 &resolve_dest_base_delta)
           : VK_NULL_HANDLE;
+  // The base delta is an offset into a TILED surface: invert it through the
+  // base granularity blocks into an (x, y) texel origin, never linear rows.
+  const uint32_t dest_bytes_per_texel =
+      FormatInfo::Get(
+          xenos::TextureFormat(resolve_info.copy_dest_info.copy_dest_format))
+          ->bits_per_pixel >>
+      3;
+  int32_t dest_delta_x = 0, dest_delta_y = 0;
+  if (resolve_dest_storage_view != VK_NULL_HANDLE && resolve_dest_base_delta) {
+    const uint32_t dest_bpp_log2 = xe::log2_floor(dest_bytes_per_texel);
+    const bool dest_is_array =
+        bool(resolve_info.copy_dest_info.copy_dest_array);
+    const uint32_t gx_log2 =
+        xenos::GetTextureTiledXBaseGranularityLog2(dest_is_array,
+                                                   dest_bpp_log2);
+    const uint32_t gy_log2 =
+        xenos::GetTextureTiledYBaseGranularityLog2(dest_is_array,
+                                                   dest_bpp_log2);
+    const uint32_t pitch_texels =
+        resolve_info.copy_dest_coordinate_info.pitch_aligned_div_32 << 5;
+    const uint32_t macro_row_bytes =
+        (pitch_texels << gy_log2) * dest_bytes_per_texel;
+    const uint32_t block_bytes =
+        (uint32_t(1) << (gx_log2 + gy_log2)) * dest_bytes_per_texel;
+    if (macro_row_bytes && block_bytes) {
+      const uint32_t block_rows = resolve_dest_base_delta / macro_row_bytes;
+      const uint32_t row_remainder = resolve_dest_base_delta % macro_row_bytes;
+      if (row_remainder % block_bytes) {
+        // No texel-origin form; upload instead of storing misplaced.
+        resolve_dest_storage_view = VK_NULL_HANDLE;
+      } else {
+        dest_delta_y = int32_t(block_rows << gy_log2);
+        dest_delta_x = int32_t((row_remainder / block_bytes) << gx_log2);
+      }
+    } else {
+      resolve_dest_storage_view = VK_NULL_HANDLE;
+    }
+  }
   const bool writes_texture =
       resolve_dest_storage_view != VK_NULL_HANDLE;
   VkPipeline pipeline = GetResolveInPassPipeline(render_pass_key, color_slot,
@@ -1972,25 +2010,12 @@ bool VulkanRenderTargetCache::TryInPassResolveCopy(
   } else {
     push_constants.host_sample = 0;
   }
-  push_constants.texture_origin[0] = int32_t(resolve_info.copy_dest_x0);
-  // A strip's y0 is relative to its own advanced base, so the rows implied by
-  // the base delta have to be added back. Whole tile rows, so the byte delta
-  // is linear in rows.
-  // Bytes per texel of the DESTINATION, which need not match the source render
-  // target: a 64bpp source can resolve into a 32bpp destination and vice versa,
-  // and 8 and 16bpp destinations exist too.
-  const uint32_t dest_bytes_per_texel =
-      FormatInfo::Get(
-          xenos::TextureFormat(resolve_info.copy_dest_info.copy_dest_format))
-          ->bits_per_pixel >>
-      3;
-  uint32_t dest_row_bytes =
-      (resolve_info.copy_dest_coordinate_info.pitch_aligned_div_32 << 5) *
-      dest_bytes_per_texel;
-  int32_t dest_delta_rows =
-      dest_row_bytes ? int32_t(resolve_dest_base_delta / dest_row_bytes) : 0;
+  // x0/y0 are relative to the resolve's own base; the delta maps them into
+  // the matched texture's space.
+  push_constants.texture_origin[0] =
+      int32_t(resolve_info.copy_dest_x0) + dest_delta_x;
   push_constants.texture_origin[1] =
-      int32_t(resolve_info.copy_dest_y0) + dest_delta_rows;
+      int32_t(resolve_info.copy_dest_y0) + dest_delta_y;
   command_buffer.CmdVkPushConstants(resolve_inpass_pipeline_layout_,
                                     VK_SHADER_STAGE_FRAGMENT_BIT, 0,
                                     sizeof(push_constants), &push_constants);

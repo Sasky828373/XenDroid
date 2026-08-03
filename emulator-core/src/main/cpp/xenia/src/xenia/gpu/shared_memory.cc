@@ -28,9 +28,10 @@ bool SharedMemory::InitializeCommon() {
       ((kBufferSize >> page_size_log2_) + 63) / 64;
   num_system_page_flags_ = static_cast<uint32_t>(num_system_page_flags_entries);
 
-  // Two flag arrays (valid, valid_and_gpu_written), 8 bytes per 64-page entry.
+  // Three flag arrays (valid, valid_and_gpu_written,
+  // invalidated_in_submission), 8 bytes per 64-page entry.
   uint64_t* system_page_flags_base = (uint64_t*)memory::AllocFixed(
-      nullptr, num_system_page_flags_ * 2 * sizeof(uint64_t),
+      nullptr, num_system_page_flags_ * 3 * sizeof(uint64_t),
       memory::AllocationType::kReserveCommit, memory::PageAccess::kReadWrite);
 
   if (!system_page_flags_base) {
@@ -41,10 +42,10 @@ bool SharedMemory::InitializeCommon() {
   system_page_flags_valid_ = system_page_flags_base;
   system_page_flags_valid_and_gpu_written_ =
       system_page_flags_base + num_system_page_flags_;
+  system_page_flags_invalidated_in_submission_ =
+      system_page_flags_base + 2 * num_system_page_flags_;
 
-  memset(system_page_flags_valid_, 0, 8 * num_system_page_flags_entries);
-  memset(system_page_flags_valid_and_gpu_written_, 0,
-         8 * num_system_page_flags_entries);
+  memset(system_page_flags_base, 0, 3 * 8 * num_system_page_flags_entries);
 
   watch_blind_pages_.assign(num_system_page_flags_, 0);
   has_watch_blind_pages_ = false;
@@ -103,7 +104,7 @@ void SharedMemory::ShutdownCommon() {
   host_gpu_memory_sparse_allocated_.shrink_to_fit();
   host_gpu_memory_sparse_granularity_log2_ = UINT32_MAX;
 
-  // One AllocFixed backs both flag arrays; valid_ is its base pointer.
+  // One AllocFixed backs all flag arrays; valid_ is its base pointer.
   if (system_page_flags_valid_) {
     memory::DeallocFixed(system_page_flags_valid_, 0,
                          memory::DeallocationType::kRelease);
@@ -111,6 +112,7 @@ void SharedMemory::ShutdownCommon() {
   }
 
   system_page_flags_valid_and_gpu_written_ = nullptr;
+  system_page_flags_invalidated_in_submission_ = nullptr;
   num_system_page_flags_ = 0;
 
   watch_blind_pages_ = {};
@@ -124,10 +126,45 @@ void SharedMemory::InvalidateAllPages() {
               num_system_page_flags_ * sizeof(uint64_t));
   std::memset(system_page_flags_valid_and_gpu_written_, 0,
               num_system_page_flags_ * sizeof(uint64_t));
+  std::memset(system_page_flags_invalidated_in_submission_, 0xFF,
+              num_system_page_flags_ * sizeof(uint64_t));
 
   // Mark all chunks dirty so the next copy refreshes everything.
   dirty_blocks_ = 0xFFFFFFFF;
   gpu_written_data_dirty_ = true;
+}
+
+void SharedMemory::OnGpuSubmissionOpened() {
+  if (!system_page_flags_invalidated_in_submission_) {
+    return;
+  }
+  auto global_lock = global_critical_region_.Acquire();
+  std::memset(system_page_flags_invalidated_in_submission_, 0,
+              num_system_page_flags_ * sizeof(uint64_t));
+}
+
+bool SharedMemory::AnyPageInvalidatedSinceSubmissionOpen(
+    const std::pair<uint32_t, uint32_t>* page_ranges, uint32_t count) const {
+  auto global_lock = global_critical_region_.Acquire();
+  for (uint32_t i = 0; i < count; ++i) {
+    uint32_t page_first = page_ranges[i].first;
+    uint32_t page_last = page_first + page_ranges[i].second - 1;
+    uint32_t block_first = page_first >> 6;
+    uint32_t block_last = page_last >> 6;
+    for (uint32_t b = block_first; b <= block_last; ++b) {
+      uint64_t mask = UINT64_MAX;
+      if (b == block_first) {
+        mask &= ~((uint64_t(1) << (page_first & 63)) - 1);
+      }
+      if (b == block_last && (page_last & 63) != 63) {
+        mask &= (uint64_t(1) << ((page_last & 63) + 1)) - 1;
+      }
+      if (system_page_flags_invalidated_in_submission_[b] & mask) {
+        return true;
+      }
+    }
+  }
+  return false;
 }
 
 void SharedMemory::ClearCache() {
@@ -164,9 +201,12 @@ void SharedMemory::SetSystemPageBlocksValidWithGpuDataWritten() {
     // Past ~50% dirty the per-chunk bookkeeping costs more than a straight
     // copy.
     if (dirty_count == 0 || dirty_count > 16) {
-      std::memcpy(system_page_flags_valid_,
-                  system_page_flags_valid_and_gpu_written_,
-                  num_system_page_flags_ * sizeof(uint64_t));
+      for (uint32_t i = 0; i < num_system_page_flags_; ++i) {
+        uint64_t gpu_written_block = system_page_flags_valid_and_gpu_written_[i];
+        system_page_flags_invalidated_in_submission_[i] |=
+            system_page_flags_valid_[i] & ~gpu_written_block;
+        system_page_flags_valid_[i] = gpu_written_block;
+      }
     } else {
       while (dirty_mask) {
         uint32_t block_index;
@@ -175,9 +215,13 @@ void SharedMemory::SetSystemPageBlocksValidWithGpuDataWritten() {
 
         // Each chunk is 64 entries of 8 bytes.
         uint32_t entry_offset = block_index * 64;
-        std::memcpy(&system_page_flags_valid_[entry_offset],
-                    &system_page_flags_valid_and_gpu_written_[entry_offset],
-                    64 * sizeof(uint64_t));
+        for (uint32_t i = entry_offset; i < entry_offset + 64; ++i) {
+          uint64_t gpu_written_block =
+              system_page_flags_valid_and_gpu_written_[i];
+          system_page_flags_invalidated_in_submission_[i] |=
+              system_page_flags_valid_[i] & ~gpu_written_block;
+          system_page_flags_valid_[i] = gpu_written_block;
+        }
       }
     }
   }
@@ -189,6 +233,8 @@ void SharedMemory::SetSystemPageBlocksValidWithGpuDataWritten() {
     for (uint32_t i = 0; i < num_system_page_flags_; ++i) {
       uint64_t blind_cpu =
           watch_blind_pages_[i] & ~system_page_flags_valid_and_gpu_written_[i];
+      system_page_flags_invalidated_in_submission_[i] |=
+          system_page_flags_valid_[i] & blind_cpu;
       system_page_flags_valid_[i] &= ~blind_cpu;
     }
   }
@@ -553,6 +599,34 @@ bool SharedMemory::IsRangeValid(uint32_t start, uint32_t length) const {
   return true;
 }
 
+bool SharedMemory::IsRangeGpuWritten(uint32_t start, uint32_t length) const {
+  if (!length) {
+    return false;
+  }
+  if (start > kBufferSize || (kBufferSize - start) < length) {
+    return false;
+  }
+
+  const uint32_t page_first = start >> page_size_log2_;
+  const uint32_t page_last = (start + length - 1) >> page_size_log2_;
+  const uint32_t block_first = page_first >> 6;
+  const uint32_t block_last = page_last >> 6;
+
+  for (uint32_t i = block_first; i <= block_last; ++i) {
+    uint64_t valid_mask = UINT64_MAX;
+    if (i == block_first) {
+      valid_mask &= ~((uint64_t(1) << (page_first & 63)) - 1);
+    }
+    if (i == block_last && (page_last & 63) != 63) {
+      valid_mask &= (uint64_t(1) << ((page_last & 63) + 1)) - 1;
+    }
+    if ((system_page_flags_valid_and_gpu_written_[i] & valid_mask) != valid_mask) {
+      return false;
+    }
+  }
+  return true;
+}
+
 template <typename T>
 XE_FORCEINLINE XE_NOALIAS static T mod_shift_left(T value, uint32_t by) {
 #if XE_ARCH_AMD64 == 1
@@ -699,6 +773,7 @@ std::pair<uint32_t, uint32_t> SharedMemory::MemoryInvalidationCallback(
     }
     system_page_flags_valid_[i] &= ~invalidate_bits;
     system_page_flags_valid_and_gpu_written_[i] &= ~invalidate_bits;
+    system_page_flags_invalidated_in_submission_[i] |= invalidate_bits;
     // Track which chunks changed for partial copying.
     dirty_blocks_mask |= (1u << (i >> 6));
   }
@@ -733,6 +808,7 @@ void SharedMemory::PrepareForTraceDownload() {
 
     // Fire watches on the invalidated pages.
     uint64_t fire_watches_block = previously_valid_block & ~gpu_written_block;
+    system_page_flags_invalidated_in_submission_[i] |= fire_watches_block;
     uint64_t fire_watches_break_block = ~fire_watches_block;
     while (true) {
       uint32_t fire_watches_block_page;

@@ -1191,6 +1191,9 @@ bool GetResolveInfo(const RegisterFile& regs, const Memory& memory,
   // Calculate the destination memory extent.
   uint32_t rb_copy_dest_base = regs[XE_GPU_REG_RB_COPY_DEST_BASE];
   uint32_t copy_dest_base_adjusted = rb_copy_dest_base;
+  info_out.copy_dest_base_unadjusted = rb_copy_dest_base;
+  info_out.copy_dest_x0 = uint32_t(x0);
+  info_out.copy_dest_y0 = uint32_t(y0);
   uint32_t copy_dest_extent_start, copy_dest_extent_end;
   auto rb_copy_dest_pitch = regs.Get<reg::RB_COPY_DEST_PITCH>();
   const uint32_t copy_dest_pitch_aligned =

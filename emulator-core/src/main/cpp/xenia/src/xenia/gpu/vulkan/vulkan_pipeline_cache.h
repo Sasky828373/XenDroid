@@ -343,7 +343,7 @@ class VulkanPipelineCache {
       }
     };
 
-    static constexpr uint32_t kVersion = 0x20260627;
+    static constexpr uint32_t kVersion = 0x20260720;
   });
 
   // Pipeline storage constants.

@@ -672,6 +672,11 @@ struct ResolveInfo {
   // copy_dest_coordinate_info.offset_x/y_div_8 - the origin of the copy
   // destination - is relative to.
   uint32_t copy_dest_base;
+  // Pre-tiling-adjustment base and the resolve rect origin, for matching a
+  // resolve destination against a TextureKey (resolve-to-texture fast path).
+  uint32_t copy_dest_base_unadjusted;
+  uint32_t copy_dest_x0;
+  uint32_t copy_dest_y0;
   // Memory range that will potentially be modified by copying to the texture.
   // copy_dest_extent_length may be zero if something is wrong with the
   // destination, in this case, clearing may still be done, but copying must be

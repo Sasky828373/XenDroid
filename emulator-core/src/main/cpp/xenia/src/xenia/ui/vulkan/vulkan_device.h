@@ -177,6 +177,10 @@ class VulkanDevice {
 
     bool dynamicRendering = false;
 
+    // VK_KHR_dynamic_rendering_local_read (#233, promoted to 1.4)
+
+    bool dynamicRenderingLocalRead = false;
+
     // VK_EXT_non_seamless_cube_map (#423)
 
     bool nonSeamlessCubeMap = false;
@@ -245,6 +249,8 @@ class VulkanDevice {
     bool ext_1_3_KHR_maintenance4 = false;  // #414
     // VK_KHR_dynamic_rendering (#55, promoted to 1.3)
     bool ext_1_3_KHR_dynamic_rendering = false;
+    // VK_KHR_dynamic_rendering_local_read (#233, promoted to 1.4)
+    bool ext_1_4_KHR_dynamic_rendering_local_read = false;
     // VK_EXT_subgroup_size_control (#226, promoted to 1.3)
     bool ext_1_3_EXT_subgroup_size_control = false;
     // VK_KHR_fragment_shader_barycentric (#322) or
@@ -284,6 +290,8 @@ class VulkanDevice {
 #include "xenia/ui/vulkan/functions/device_1_3_khr_maintenance4.inc"
     // VK_KHR_dynamic_rendering (#55, promoted to 1.3)
 #include "xenia/ui/vulkan/functions/device_1_3_khr_dynamic_rendering.inc"
+    // VK_KHR_dynamic_rendering_local_read (#233, promoted to 1.4)
+#include "xenia/ui/vulkan/functions/device_1_4_khr_dynamic_rendering_local_read.inc"
     // VK_EXT_extended_dynamic_state (#268, promoted to 1.3) +
     // VK_EXT_extended_dynamic_state2 (#378, promoted to 1.3).
 #include "xenia/ui/vulkan/functions/device_ext_extended_dynamic_state.inc"

@@ -30,6 +30,13 @@ DEFINE_bool(vulkan_sparse_shared_memory, true,
             "work.",
             "Vulkan");
 
+DEFINE_bool(vulkan_hoist_shmem_uploads, true,
+            "Record shared-memory uploads whose pages were not invalidated "
+            "since the current submission opened at the start of the "
+            "submission's command buffer instead of breaking the current "
+            "render pass (expensive on tile-based GPUs).",
+            "Vulkan");
+
 DEFINE_bool(vulkan_shared_memory_host_visible, true,
             "On unified-memory GPUs (Adreno, integrated), allocate the "
             "shared-memory buffer from a host-visible cached memory type and "
@@ -507,27 +514,49 @@ bool VulkanSharedMemory::UploadRanges(
   auto& range_front = upload_page_ranges[0];
   auto& range_back = upload_page_ranges[num_upload_ranges - 1];
 
-  // upload_page_ranges are sorted, use them to determine the range for the
-  // ordering barrier.
-  Use(Usage::kTransferDestination,
-      std::make_pair(range_front.first << page_size_log2(),
-                     (range_back.first + range_back.second - range_front.first)
-                         << page_size_log2()));
-  // Submit barriers (may end render pass) before pushing debug marker so
-  // EndRenderPass is not inside the SharedMem Upload marker.
-  command_processor_.SubmitBarriers(true);
+  // Copies of pages never invalidated while this submission was recording
+  // can't have been read by an already-recorded command, so they can execute
+  // at the head of the submission's command buffer without breaking the
+  // current render pass.
+  bool hoist = cvars::vulkan_hoist_shmem_uploads &&
+               !AnyPageInvalidatedSinceSubmissionOpen(upload_page_ranges,
+                                                      num_upload_ranges);
 
-  // Calculate total upload size for debug marker.
-  uint32_t total_upload_bytes =
-      (range_back.first + range_back.second - range_front.first)
-      << page_size_log2();
-  command_processor_.PushDebugMarker(
-      "UploadRanges (SharedMem): 0x%08X-0x%08X (%u KB, %u ranges)",
-      range_front.first << page_size_log2(),
-      (range_back.first + range_back.second) << page_size_log2(),
-      total_upload_bytes / 1024, num_upload_ranges);
+  if (!hoist) {
+    // upload_page_ranges are sorted - the bounds give the barrier range.
+    Use(Usage::kTransferDestination,
+        std::make_pair(
+            range_front.first << page_size_log2(),
+            (range_back.first + range_back.second - range_front.first)
+                << page_size_log2()));
+    // Submit barriers (may end render pass) before pushing debug marker so
+    // EndRenderPass is not inside the SharedMem Upload marker.
+    command_processor_.SubmitBarriers(true);
+
+    uint32_t total_upload_bytes =
+        (range_back.first + range_back.second - range_front.first)
+        << page_size_log2();
+    command_processor_.PushDebugMarker(
+        "UploadRanges (SharedMem): 0x%08X-0x%08X (%u KB, %u ranges)",
+        range_front.first << page_size_log2(),
+        (range_back.first + range_back.second) << page_size_log2(),
+        total_upload_bytes / 1024, num_upload_ranges);
+  }
   DeferredCommandBuffer& command_buffer =
-      command_processor_.deferred_command_buffer();
+      hoist ? command_processor_.deferred_setup_command_buffer()
+            : command_processor_.deferred_command_buffer();
+  if (hoist && command_buffer.empty()) {
+    // Once per submission: order the head copies after shared-memory writes
+    // from previous submissions.
+    VkMemoryBarrier barrier;
+    barrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+    barrier.pNext = nullptr;
+    barrier.srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT;
+    barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    command_buffer.CmdVkPipelineBarrier(VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+                                        VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1,
+                                        &barrier, 0, nullptr, 0, nullptr);
+  }
   uint64_t submission_current = command_processor_.GetCurrentSubmission();
   bool successful = true;
   upload_regions_.clear();
@@ -619,7 +648,9 @@ bool VulkanSharedMemory::UploadRanges(
                                    upload_regions_.data());
     upload_regions_.clear();
   }
-  command_processor_.PopDebugMarker();
+  if (!hoist) {
+    command_processor_.PopDebugMarker();
+  }
   return successful;
 }
 

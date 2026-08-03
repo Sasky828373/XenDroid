@@ -27,6 +27,7 @@
 #include "xenia/ui/vulkan/vulkan_upload_buffer_pool.h"
 
 DECLARE_bool(vulkan_depth_unorm24);
+DECLARE_bool(vulkan_normalize_dontcare_keys);
 
 namespace xe {
 namespace gpu {
@@ -136,6 +137,18 @@ class VulkanRenderTargetCache final : public RenderTargetCache {
               reg::RB_DEPTHCONTROL normalized_depth_control,
               uint32_t normalized_color_mask,
               const Shader& vertex_shader) override;
+  // depth_and_color_load_dont_care only selects loadOp - it is not part of
+  // what a framebuffer or pipeline IS. Strip it from cache keys, or toggling
+  // a discard bit yields a different Framebuffer* and the pointer-identity
+  // check ends the pass for nothing. The bits stay in
+  // last_update_render_pass_key_, so real pass begins keep their DONT_CARE.
+  RenderPassKey NormalizeKeyForCacheLookup(RenderPassKey key) const {
+    if (cvars::vulkan_normalize_dontcare_keys && use_dynamic_rendering_) {
+      key.depth_and_color_load_dont_care = 0;
+    }
+    return key;
+  }
+
   // Binding information for the last successful update.
   RenderPassKey last_update_render_pass_key() const {
     return last_update_render_pass_key_;
@@ -197,6 +210,18 @@ class VulkanRenderTargetCache final : public RenderTargetCache {
   bool gamma_render_target_as_unorm16() const {
     return gamma_render_target_as_unorm16_;
   }
+
+  // Color attachment usage for guest passes; switches to the
+  // RENDERING_LOCAL_READ layout (+ fragment-stage input-attachment access)
+  // when in-pass resolves are enabled and supported.
+  bool local_read_attachments() const { return local_read_attachments_; }
+  VkPipelineStageFlags color_draw_stage_mask() const {
+    return color_draw_stage_mask_;
+  }
+  VkAccessFlags color_draw_access_mask() const {
+    return color_draw_access_mask_;
+  }
+  VkImageLayout color_draw_layout() const { return color_draw_layout_; }
 
   bool msaa_2x_attachments_supported() const {
     return msaa_2x_attachments_supported_;
@@ -338,6 +363,8 @@ class VulkanRenderTargetCache final : public RenderTargetCache {
       descriptor_set_pool_sampled_image_;
   std::unique_ptr<ui::vulkan::SingleLayoutDescriptorSetPool>
       descriptor_set_pool_sampled_image_x2_;
+  std::unique_ptr<ui::vulkan::SingleLayoutDescriptorSetPool>
+      descriptor_set_pool_input_attachment_;
 
   VkDeviceMemory edram_buffer_memory_ = VK_NULL_HANDLE;
   VkBuffer edram_buffer_ = VK_NULL_HANDLE;
@@ -388,6 +415,29 @@ class VulkanRenderTargetCache final : public RenderTargetCache {
       last_update_framebuffer_attachments_[1 + xenos::kMaxColorRenderTargets] =
           {};
   const Framebuffer* last_update_framebuffer_ = VK_NULL_HANDLE;
+
+  bool local_read_attachments_ = false;
+  uint64_t inpass_attempts_ = 0;
+  uint64_t inpass_taken_ = 0;
+  uint64_t inpass_stores_ = 0;
+  uint64_t inpass_store_refused_ = 0;
+  uint64_t inpass_refuse_pitch_ = 0;
+  uint64_t inpass_refuse_format_ = 0;
+  uint64_t inpass_refuse_bounds_ = 0;
+  uint64_t inpass_format_hist_[16] = {};
+  static constexpr uint32_t kInPassRejectReasons = 24;
+  const char* inpass_reject_reasons_[kInPassRejectReasons] = {};
+  uint64_t inpass_reject_counts_[kInPassRejectReasons] = {};
+  uint32_t inpass_reject_reason_count_ = 0;
+  uint32_t inpass_combos_[16] = {};
+  uint32_t inpass_combo_count_ = 0;
+  bool use_dynamic_rendering_ = false;
+  VkPipelineStageFlags color_draw_stage_mask_ =
+      VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+  VkAccessFlags color_draw_access_mask_ =
+      VK_ACCESS_COLOR_ATTACHMENT_READ_BIT |
+      VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+  VkImageLayout color_draw_layout_ = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
 
   // For host render targets.
 
@@ -442,6 +492,16 @@ class VulkanRenderTargetCache final : public RenderTargetCache {
                  ? view_color_transfer_separate_
                  : view_depth_color_;
     }
+    void SetDescriptorSetIndexInputAttachment(size_t index) {
+      descriptor_set_index_input_attachment_ = index;
+    }
+    VkDescriptorSet GetDescriptorSetInputAttachment() const {
+      return render_target_cache_.descriptor_set_pool_input_attachment_->Get(
+          descriptor_set_index_input_attachment_);
+    }
+    bool HasDescriptorSetInputAttachment() const {
+      return descriptor_set_index_input_attachment_ != SIZE_MAX;
+    }
     VkDescriptorSet GetDescriptorSetTransferSource() const {
       ui::vulkan::SingleLayoutDescriptorSetPool& descriptor_set_pool =
           key().is_depth
@@ -450,25 +510,24 @@ class VulkanRenderTargetCache final : public RenderTargetCache {
       return descriptor_set_pool.Get(descriptor_set_index_transfer_source_);
     }
 
-    static void GetDrawUsage(bool is_depth,
-                             VkPipelineStageFlags* stage_mask_out,
-                             VkAccessFlags* access_mask_out,
-                             VkImageLayout* layout_out) {
-      if (stage_mask_out) {
-        *stage_mask_out = is_depth ? kDepthDrawStageMask : kColorDrawStageMask;
-      }
-      if (access_mask_out) {
-        *access_mask_out =
-            is_depth ? kDepthDrawAccessMask : kColorDrawAccessMask;
-      }
-      if (layout_out) {
-        *layout_out = is_depth ? kDepthDrawLayout : kColorDrawLayout;
-      }
-    }
     void GetDrawUsage(VkPipelineStageFlags* stage_mask_out,
                       VkAccessFlags* access_mask_out,
                       VkImageLayout* layout_out) const {
-      GetDrawUsage(key().is_depth, stage_mask_out, access_mask_out, layout_out);
+      bool is_depth = key().is_depth;
+      if (stage_mask_out) {
+        *stage_mask_out = is_depth
+                              ? kDepthDrawStageMask
+                              : render_target_cache_.color_draw_stage_mask();
+      }
+      if (access_mask_out) {
+        *access_mask_out = is_depth
+                               ? kDepthDrawAccessMask
+                               : render_target_cache_.color_draw_access_mask();
+      }
+      if (layout_out) {
+        *layout_out = is_depth ? kDepthDrawLayout
+                               : render_target_cache_.color_draw_layout();
+      }
     }
     VkPipelineStageFlags current_stage_mask() const {
       return current_stage_mask_;
@@ -489,6 +548,7 @@ class VulkanRenderTargetCache final : public RenderTargetCache {
 
    private:
     VulkanRenderTargetCache& render_target_cache_;
+    size_t descriptor_set_index_input_attachment_ = SIZE_MAX;
 
     VkImage image_;
     VkDeviceMemory memory_;
@@ -934,6 +994,12 @@ class VulkanRenderTargetCache final : public RenderTargetCache {
   // samples. If there was a failure to create a pipeline, returns nullptr.
   VkPipeline const* GetTransferPipelines(TransferPipelineKey key);
 
+  // In-pass fragment resolve (VK_KHR_dynamic_rendering_local_read); the color
+  // slot is the current pass's color attachment being resolved.
+  VkPipeline GetResolveInPassPipeline(RenderPassKey render_pass_key,
+                                      uint32_t color_slot, bool is_64bpp,
+                                      bool writes_texture);
+
   // Selects the transfer mode for one ownership transfer from the source/dest
   // aspects. Shared by PerformTransfersAndResolveClears and the draw-pass
   // transfer preflight so the two paths can't disagree on the mode.
@@ -987,6 +1053,13 @@ class VulkanRenderTargetCache final : public RenderTargetCache {
       draw_util::ResolveCopyShaderIndex copy_shader);
   VkPipeline GetDirectHostDepthResolvePipeline(xenos::MsaaSamples msaa_samples,
                                                bool scaled);
+  bool TryInPassResolveCopy(
+      const draw_util::ResolveInfo& resolve_info,
+      const draw_util::ResolveCopyShaderConstants& copy_shader_constants,
+      draw_util::ResolveCopyShaderIndex copy_shader, uint32_t dump_base,
+      uint32_t dump_row_length_used, uint32_t dump_rows, uint32_t dump_pitch,
+      VulkanSharedMemory& shared_memory, VulkanTextureCache& texture_cache,
+      uint32_t& written_address_out, uint32_t& written_length_out);
   bool TryDirectHostResolveCopy(
       const draw_util::ResolveInfo& resolve_info,
       const draw_util::ResolveCopyShaderConstants& copy_shader_constants,
@@ -1038,6 +1111,17 @@ class VulkanRenderTargetCache final : public RenderTargetCache {
   std::unordered_map<TransferPipelineKey, std::array<VkPipeline, 4>,
                      TransferPipelineKey::Hasher>
       transfer_pipelines_;
+
+  // In-pass fragment resolve objects, only created in local-read mode.
+  VkDescriptorSetLayout descriptor_set_layout_input_attachment_ =
+      VK_NULL_HANDLE;
+  VkPipelineLayout resolve_inpass_pipeline_layout_ = VK_NULL_HANDLE;
+  // Bit 0: 64bpp dest, bit 1: multisampled source.
+  // [is_64bpp | msaa<<1 | writes_texture<<2]
+  VkShaderModule resolve_inpass_shaders_[8] = {};
+  VkShaderModule resolve_inpass_vertex_shader_ = VK_NULL_HANDLE;
+  // Bits 0-31: RenderPassKey, 32-33: color slot, 34: 64bpp dest.
+  std::unordered_map<uint64_t, VkPipeline> resolve_inpass_pipelines_;
 
   VkPipelineLayout dump_pipeline_layout_color_ = VK_NULL_HANDLE;
   VkPipelineLayout dump_pipeline_layout_depth_ = VK_NULL_HANDLE;

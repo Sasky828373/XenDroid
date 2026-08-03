@@ -14,6 +14,7 @@
 #include <memory>
 #include <unordered_map>
 #include <utility>
+#include <vector>
 
 #include "xenia/base/hash.h"
 #include "xenia/gpu/texture_cache.h"
@@ -28,6 +29,61 @@ namespace vulkan {
 class VulkanCommandProcessor;
 
 class VulkanTextureCache final : public TextureCache {
+ public:
+  // Recorded per resolve so texture uploads can be tested against it.
+  struct ResolveDestDescriptor {
+    uint32_t base;          // copy_dest_base_unadjusted & 0x1FFFFFFF
+    uint32_t pitch_div_32;  // copy_dest_coordinate_info.pitch_aligned_div_32
+    uint32_t x0, y0, width, height;
+    uint32_t format;    // xenos::ColorFormat
+    uint32_t endian;    // copy_dest_info.copy_dest_endian
+    uint32_t is_array;  // copy_dest_info.copy_dest_array
+    // Memory is reused across scenes, so coverage must only trust resolves
+    // from the frame being served.
+    uint64_t frame;
+  };
+  void NoteResolveDestination(const ResolveDestDescriptor& desc);
+  // Storage view of the promoted texture an in-pass resolve to `base` should
+  // fill. Large surfaces are resolved in strips, each with its own advancing
+  // base, so `base_delta_out` reports how far into the texture this strip
+  // starts - the caller converts it to a row offset.
+  struct ResolveDestTextureInfo {
+    uint32_t width = 0, height = 0, pitch = 0, format = 0;
+  };
+  VkImageView GetResolveDestStorageView(
+      uint32_t base, uint32_t* base_delta_out,
+      ResolveDestTextureInfo* info_out) const;
+  // Stamps the promoted texture at `base` as filled by a resolve this frame.
+  void MarkResolveDestWritten(uint32_t base, uint64_t frame);
+
+ private:
+  class VulkanTexture;
+  // Textures that already existed when a resolve first targeted them: they
+  // were created without STORAGE usage, so they must be recreated once before
+  // they can be promoted. Without this only textures that happen to be created
+  // while a matching resolve is live ever get promoted.
+  std::vector<TextureKey> resolve_dest_promotion_queue_;
+  // Promoted textures by guest base address, so an in-pass resolve can find
+  // the image it is about to fill. Entries are removed by ~VulkanTexture.
+  std::unordered_map<uint32_t, VulkanTexture*> resolve_dest_textures_;
+
+  // Sized well above the per-frame resolve count so a frame stays visible.
+  static constexpr size_t kResolveDestHistory = 256;
+  std::array<ResolveDestDescriptor, kResolveDestHistory> resolve_dests_{};
+  size_t resolve_dests_next_ = 0;
+  // Whether a resolve wrote everything the texture would be uploaded from.
+  bool IsResolveDestEligible(const Texture& texture) const;
+  // Whether full-width resolves have covered every row of the surface.
+  bool ResolveDestsCoverSurface(uint32_t base, uint32_t size_bytes,
+                                uint32_t pitch_div_32, uint32_t width,
+                                uint32_t height, uint64_t frame) const;
+  VulkanTexture* FindResolveDestTexture(
+      uint32_t base, uint32_t* base_delta_out = nullptr) const;
+  bool ShouldPromoteToResolveDest(const TextureKey& key) const;
+  // Whether the texture can be served from its resolve instead of uploaded.
+  bool TryServeFromResolveDest(const VulkanTexture& texture, bool load_base,
+                               bool load_mips) const;
+
  public:
   // Sampler parameters that can be directly converted to a host sampler or used
   // for checking whether samplers bindings are up to date.
@@ -287,6 +343,11 @@ class VulkanTextureCache final : public TextureCache {
       kSwapSampled,
     };
 
+   private:
+    VkImageView resolve_dest_storage_view_ = VK_NULL_HANDLE;
+    uint64_t resolve_dest_written_frame_ = 0;
+
+   public:
     // Takes ownership of the image and its memory.
     // track_usage: if false, texture won't participate in LRU cache eviction.
     explicit VulkanTexture(VulkanTextureCache& texture_cache,
@@ -295,6 +356,21 @@ class VulkanTextureCache final : public TextureCache {
     ~VulkanTexture();
 
     VkImage image() const { return image_; }
+
+    // Uint-aliased storage view an in-pass resolve writes through. Null unless
+    // the texture was promoted at creation.
+    VkImageView resolve_dest_storage_view() const {
+      return resolve_dest_storage_view_;
+    }
+    void SetResolveDestStorageView(VkImageView view) {
+      resolve_dest_storage_view_ = view;
+    }
+    uint64_t resolve_dest_written_frame() const {
+      return resolve_dest_written_frame_;
+    }
+    void SetResolveDestWrittenFrame(uint64_t frame) {
+      resolve_dest_written_frame_ = frame;
+    }
 
     // Doesn't transition (the caller must insert the barrier).
     Usage SetUsage(Usage new_usage) {

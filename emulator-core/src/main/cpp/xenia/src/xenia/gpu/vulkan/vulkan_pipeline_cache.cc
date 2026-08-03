@@ -1235,7 +1235,11 @@ bool VulkanPipelineCache::GetCurrentStateDescription(
         pixel_shader->shader().ucode_data_hash();
     description_out.pixel_shader_modification = pixel_shader->modification();
   }
-  description_out.render_pass_key = render_pass_key;
+  // Same normalization as the framebuffer key: the loadOp discard bits do not
+  // affect pipeline compatibility under dynamic rendering, and letting them
+  // into the key duplicates pipelines.
+  description_out.render_pass_key =
+      render_target_cache_.NormalizeKeyForCacheLookup(render_pass_key);
 
   // TODO(Triang3l): Implement primitive types currently using geometry shaders
   // without them.

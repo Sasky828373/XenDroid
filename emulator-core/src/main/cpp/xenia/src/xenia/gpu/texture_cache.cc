@@ -252,6 +252,25 @@ void TextureCache::CompletedSubmissionUpdated(
   }
 }
 
+bool TextureCache::RecreateTextureForHostChange(
+    const TextureKey& key, uint64_t completed_submission_index) {
+  auto it = textures_.find(key);
+  if (it == textures_.end()) {
+    return false;
+  }
+  Texture* texture = it->second.get();
+  if (!texture ||
+      texture->last_usage_submission_index() > completed_submission_index) {
+    // Still in flight - try again later rather than destroying a bound image.
+    return false;
+  }
+  // The texture may still be bound from an earlier submission with nothing
+  // having overwritten the binding, same reasoning as the LRU eviction path.
+  ResetTextureBindings();
+  textures_.erase(it);
+  return true;
+}
+
 void TextureCache::BeginSubmission(uint64_t new_submission_index) {
   assert_true(new_submission_index > current_submission_index_);
   current_submission_index_ = new_submission_index;
@@ -272,6 +291,7 @@ void TextureCache::MarkRangeAsResolved(uint32_t start_unscaled,
   }
   start_unscaled &= 0x1FFFFFFF;
   length_unscaled = std::min(length_unscaled, 0x20000000 - start_unscaled);
+  NoteResolvedRange(start_unscaled, length_unscaled);
 
   if (IsDrawResolutionScaled()) {
     uint32_t page_first = start_unscaled >> 12;

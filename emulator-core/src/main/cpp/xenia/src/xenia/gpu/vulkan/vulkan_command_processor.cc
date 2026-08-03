@@ -40,6 +40,7 @@
 #include "xenia/ui/vulkan/vulkan_util.h"
 
 DECLARE_bool(clear_memory_page_state);
+DECLARE_bool(vulkan_in_pass_resolve_debug_read_usage);
 DECLARE_bool(log_gpu_frame_time_breakdown);
 
 DEFINE_int32(
@@ -182,6 +183,7 @@ VulkanCommandProcessor::VulkanCommandProcessor(
               ->vulkan_device(),
           "cp-transfer"),
       deferred_command_buffer_(*this),
+      deferred_setup_command_buffer_(*this, 64 * 1024),
       transient_descriptor_allocator_uniform_buffer_(
           static_cast<const ui::vulkan::VulkanProvider*>(
               graphics_system->provider())
@@ -453,6 +455,35 @@ bool VulkanCommandProcessor::SetupContext() {
         "bound to the compute shader");
     return false;
   }
+  descriptor_set_layout_binding_transient.stageFlags =
+      VK_SHADER_STAGE_FRAGMENT_BIT;
+  if (dfn.vkCreateDescriptorSetLayout(
+          device, &descriptor_set_layout_create_info, nullptr,
+          &descriptor_set_layouts_single_transient_[size_t(
+              SingleTransientDescriptorLayout::kStorageBufferFragment)]) !=
+      VK_SUCCESS) {
+    XELOGE(
+        "Failed to create a Vulkan descriptor set layout for a storage buffer "
+        "bound to the fragment shader");
+    return false;
+  }
+  // Transient: storage image for the resolve-to-texture fragment variant.
+  descriptor_set_layout_binding_transient.descriptorType =
+      VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+  if (dfn.vkCreateDescriptorSetLayout(
+          device, &descriptor_set_layout_create_info, nullptr,
+          &descriptor_set_layouts_single_transient_[size_t(
+              SingleTransientDescriptorLayout::kStorageImageFragment)]) !=
+      VK_SUCCESS) {
+    XELOGE(
+        "Failed to create a Vulkan descriptor set layout for a storage image "
+        "bound to the fragment shader");
+    return false;
+  }
+  descriptor_set_layout_binding_transient.descriptorType =
+      VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+  descriptor_set_layout_binding_transient.stageFlags =
+      VK_SHADER_STAGE_COMPUTE_BIT;
   descriptor_set_layout_binding_transient.binding = 1;
   descriptor_set_layout_binding_transient.descriptorType =
       VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
@@ -1778,6 +1809,7 @@ void VulkanCommandProcessor::ShutdownContext() {
   sparse_memory_binds_.clear();
 
   deferred_command_buffer_.Reset();
+  deferred_setup_command_buffer_.Reset();
   for (const auto& command_buffer_pair : command_buffers_submitted_) {
     dfn.vkDestroyCommandPool(device, command_buffer_pair.second.pool, nullptr);
   }
@@ -3272,7 +3304,9 @@ void VulkanCommandProcessor::SubmitBarriersAndEnterRenderTargetCacheRenderPass(
       color_attachment.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
       color_attachment.pNext = nullptr;
       color_attachment.imageView = transfer_dest_view;
-      color_attachment.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+      // Must agree with the layout the usage barrier actually recorded, which
+      // is RENDERING_LOCAL_READ when local-read attachments are enabled.
+      color_attachment.imageLayout = render_target_cache_->color_draw_layout();
       color_attachment.resolveMode = VK_RESOLVE_MODE_NONE;
       color_attachment.resolveImageView = VK_NULL_HANDLE;
       color_attachment.resolveImageLayout = VK_IMAGE_LAYOUT_UNDEFINED;
@@ -3359,7 +3393,9 @@ VkDescriptorSet VulkanCommandProcessor::AllocateSingleTransientDescriptor(
     const VkDevice device = vulkan_device->device();
     bool is_storage_buffer =
         transient_descriptor_layout ==
-        SingleTransientDescriptorLayout::kStorageBufferCompute;
+            SingleTransientDescriptorLayout::kStorageBufferCompute ||
+        transient_descriptor_layout ==
+            SingleTransientDescriptorLayout::kStorageBufferFragment;
     ui::vulkan::LinkedTypeDescriptorSetAllocator&
         transient_descriptor_allocator =
             is_storage_buffer ? transient_descriptor_allocator_storage_buffer_
@@ -4378,7 +4414,14 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
         std::make_pair(memexport_extent_start,
                        memexport_extent_end - memexport_extent_start));
   } else {
-    shared_memory_->Use(VulkanSharedMemory::Usage::kRead);
+    // With in-pass resolves, fragment shaders may write shared memory inside
+    // any guest pass - declare the write usage up front so no barrier is
+    // needed at the resolve point.
+    shared_memory_->Use(
+        (render_target_cache_->local_read_attachments() &&
+         !cvars::vulkan_in_pass_resolve_debug_read_usage)
+            ? VulkanSharedMemory::Usage::kGuestDrawReadWrite
+            : VulkanSharedMemory::Usage::kRead);
   }
 
   // After all commands that may dispatch, copy or insert barriers, submit the
@@ -6701,6 +6744,10 @@ bool VulkanCommandProcessor::BeginSubmission(bool is_guest_command) {
     // the end of the submission (when async pipeline object creation requests
     // are fulfilled).
     deferred_command_buffer_.Reset();
+    deferred_setup_command_buffer_.Reset();
+    if (shared_memory_) {
+      shared_memory_->OnGpuSubmissionOpened();
+    }
 
     // Reset cached state of the command buffer.
     dynamic_viewport_update_needed_ = true;
@@ -7038,6 +7085,19 @@ bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
     // at replay drop their draws. Also persists the driver pipeline cache
     // (throttled) and flushes the shader/pipeline storage files.
     pipeline_cache_->EndSubmission();
+    if (!deferred_setup_command_buffer_.empty()) {
+      deferred_setup_command_buffer_.Execute(command_buffer.buffer);
+      VkMemoryBarrier setup_barrier;
+      setup_barrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+      setup_barrier.pNext = nullptr;
+      setup_barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+      setup_barrier.dstAccessMask =
+          VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
+      dfn.vkCmdPipelineBarrier(
+          command_buffer.buffer, VK_PIPELINE_STAGE_TRANSFER_BIT,
+          VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 1, &setup_barrier, 0, nullptr,
+          0, nullptr);
+    }
     deferred_command_buffer_.Execute(command_buffer.buffer);
 
     // Record ZPD resolves before submitting.

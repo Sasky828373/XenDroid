@@ -31,6 +31,20 @@
 DECLARE_bool(tiled_shared_memory);
 
 DEFINE_bool(
+    vulkan_resolve_to_texture_serve, true,
+    "Skip the compute upload for textures an in-pass resolve already filled "
+    "this frame. This is where the round-trip upload traffic disappears; "
+    "requires vulkan_resolve_to_texture_promote and vulkan_resolve_to_texture.",
+    "Vulkan");
+
+DEFINE_bool(
+    vulkan_resolve_to_texture_promote, true,
+    "Allocate textures that an in-pass resolve writes with STORAGE usage and a "
+    "uint alias view, so the resolve can write them directly. Changes nothing "
+    "on its own, but costs framebuffer compression on those textures.",
+    "Vulkan");
+
+DEFINE_bool(
     vulkan_fast_sampler_filterability, true,
     "Derive host linear-filterability for samplers directly from the fetch "
     "constant instead of building the full texture binding info (texture key "
@@ -512,6 +526,17 @@ VulkanTextureCache::~VulkanTextureCache() {
 }
 
 void VulkanTextureCache::BeginSubmission(uint64_t new_submission_index) {
+  if (!resolve_dest_promotion_queue_.empty()) {
+    uint64_t completed = command_processor_.GetCompletedSubmission();
+    auto pending = std::move(resolve_dest_promotion_queue_);
+    resolve_dest_promotion_queue_.clear();
+    for (const TextureKey& key : pending) {
+      if (!RecreateTextureForHostChange(key, completed)) {
+        // Still in flight - retry next submission.
+        resolve_dest_promotion_queue_.push_back(key);
+      }
+    }
+  }
   TextureCache::BeginSubmission(new_submission_index);
 
   if (!null_images_cleared_) {
@@ -525,7 +550,7 @@ void VulkanTextureCache::BeginSubmission(uint64_t new_submission_index) {
           VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
           VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED, false);
     }
-    command_processor_.SubmitBarriers(true);
+  command_processor_.SubmitBarriers(true);
     DeferredCommandBuffer& command_buffer =
         command_processor_.deferred_command_buffer();
     // TODO(Triang3l): Find the return value for invalid texture fetch constants
@@ -1152,13 +1177,38 @@ std::unique_ptr<TextureCache::Texture> VulkanTextureCache::CreateTexture(
   bool is_3d = key.dimension == xenos::DataDimension::k3D;
   uint32_t depth_or_array_size = key.GetDepthOrArraySize();
 
+  // Resolve-to-texture: the resolve writes the texel already packed, so the
+  // image needs a same-size uint alias it can be stored through. Only the
+  // formats an in-pass resolve can produce are supported.
+  VkFormat resolve_dest_uint_format = VK_FORMAT_UNDEFINED;
+  if (ShouldPromoteToResolveDest(key)) {
+    switch (formats[0]) {
+      case VK_FORMAT_R8G8B8A8_UNORM:
+      case VK_FORMAT_A2B10G10R10_UNORM_PACK32:
+      case VK_FORMAT_R32_SFLOAT:
+        resolve_dest_uint_format = VK_FORMAT_R32_UINT;
+        break;
+      case VK_FORMAT_R32G32_SFLOAT:
+      case VK_FORMAT_R16G16B16A16_SFLOAT:
+        resolve_dest_uint_format = VK_FORMAT_R32G32_UINT;
+        break;
+      default:
+        break;
+    }
+  }
+
   VkImageCreateInfo image_create_info;
   VkImageCreateInfo* image_create_info_last = &image_create_info;
   image_create_info.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
   image_create_info.pNext = nullptr;
   image_create_info.flags = 0;
-  if (formats[1] != VK_FORMAT_UNDEFINED) {
+  if (formats[1] != VK_FORMAT_UNDEFINED ||
+      resolve_dest_uint_format != VK_FORMAT_UNDEFINED) {
     image_create_info.flags |= VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT;
+  }
+  if (resolve_dest_uint_format != VK_FORMAT_UNDEFINED) {
+    // STORAGE is only valid for the uint view, not for the base format.
+    image_create_info.flags |= VK_IMAGE_CREATE_EXTENDED_USAGE_BIT;
   }
   if (key.dimension == xenos::DataDimension::kCube) {
     image_create_info.flags |= VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT;
@@ -1183,12 +1233,30 @@ std::unique_ptr<TextureCache::Texture> VulkanTextureCache::CreateTexture(
   if (key.scaled_resolve && key.mip_max_level > 0) {
     image_create_info.usage |= VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
   }
+  if (resolve_dest_uint_format != VK_FORMAT_UNDEFINED) {
+    image_create_info.usage |= VK_IMAGE_USAGE_STORAGE_BIT;
+  }
+  if (resolve_dest_uint_format != VK_FORMAT_UNDEFINED) {
+    static uint32_t promoted_logged = 0;
+    if (cvars::log_gpu_frame_time_breakdown && promoted_logged < 32) {
+      ++promoted_logged;
+      XELOGI("VkPromote: {}x{} fmt={} -> uint alias {} (#{})", key.GetWidth(),
+             key.GetHeight(), uint32_t(key.format),
+             uint32_t(resolve_dest_uint_format), promoted_logged);
+    }
+  }
   image_create_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
   image_create_info.queueFamilyIndexCount = 0;
   image_create_info.pQueueFamilyIndices = nullptr;
   image_create_info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+  VkFormat image_view_formats[3] = {formats[0], formats[1],
+                                    resolve_dest_uint_format};
+  uint32_t image_view_format_count = formats[1] != VK_FORMAT_UNDEFINED ? 2 : 1;
+  if (resolve_dest_uint_format != VK_FORMAT_UNDEFINED) {
+    image_view_formats[image_view_format_count++] = resolve_dest_uint_format;
+  }
   VkImageFormatListCreateInfo image_format_list_create_info;
-  if (formats[1] != VK_FORMAT_UNDEFINED &&
+  if (image_view_format_count > 1 &&
       vulkan_device->extensions().ext_1_2_KHR_image_format_list) {
     image_create_info_last->pNext = &image_format_list_create_info;
     image_create_info_last =
@@ -1196,8 +1264,8 @@ std::unique_ptr<TextureCache::Texture> VulkanTextureCache::CreateTexture(
     image_format_list_create_info.sType =
         VK_STRUCTURE_TYPE_IMAGE_FORMAT_LIST_CREATE_INFO;
     image_format_list_create_info.pNext = nullptr;
-    image_format_list_create_info.viewFormatCount = 2;
-    image_format_list_create_info.pViewFormats = formats;
+    image_format_list_create_info.viewFormatCount = image_view_format_count;
+    image_format_list_create_info.pViewFormats = image_view_formats;
   }
 
   VmaAllocationCreateInfo allocation_create_info = {};
@@ -1207,22 +1275,282 @@ std::unique_ptr<TextureCache::Texture> VulkanTextureCache::CreateTexture(
   VmaAllocation allocation;
   if (vmaCreateImage(vma_allocator_, &image_create_info,
                      &allocation_create_info, &image, &allocation, nullptr)) {
-    XELOGE(
-        "VulkanTextureCache: vmaCreateImage failed (format {}, {}x{}x{}, "
-        "guest format {})",
-        uint32_t(image_create_info.format), image_create_info.extent.width,
-        image_create_info.extent.height, image_create_info.extent.depth,
-        uint32_t(key.format));
-    return nullptr;
+    if (resolve_dest_uint_format != VK_FORMAT_UNDEFINED) {
+      // Driver refuses the promoted flags - create unpromoted; a refused
+      // promotion must never cost the texture itself.
+      XELOGW(
+          "VulkanTextureCache: resolve-to-texture promotion unsupported for "
+          "format {}, falling back to a plain texture",
+          uint32_t(image_create_info.format));
+      resolve_dest_uint_format = VK_FORMAT_UNDEFINED;
+      image_create_info.flags &= ~VK_IMAGE_CREATE_EXTENDED_USAGE_BIT;
+      image_create_info.usage &= ~VK_IMAGE_USAGE_STORAGE_BIT;
+      if (formats[1] == VK_FORMAT_UNDEFINED) {
+        image_create_info.flags &= ~VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT;
+      }
+      image_view_format_count = formats[1] != VK_FORMAT_UNDEFINED ? 2 : 1;
+      if (image_view_format_count > 1) {
+        image_format_list_create_info.viewFormatCount = image_view_format_count;
+      } else {
+        image_create_info.pNext = nullptr;
+      }
+    }
+    if (vmaCreateImage(vma_allocator_, &image_create_info,
+                       &allocation_create_info, &image, &allocation,
+                       nullptr)) {
+      XELOGE(
+          "VulkanTextureCache: vmaCreateImage failed (format {}, {}x{}x{}, "
+          "guest format {})",
+          uint32_t(image_create_info.format), image_create_info.extent.width,
+          image_create_info.extent.height, image_create_info.extent.depth,
+          uint32_t(key.format));
+      return nullptr;
+    }
   }
 
-  return std::unique_ptr<Texture>(
-      new VulkanTexture(*this, key, image, allocation));
+  auto vulkan_texture = new VulkanTexture(*this, key, image, allocation);
+  if (resolve_dest_uint_format != VK_FORMAT_UNDEFINED) {
+    VkImageViewCreateInfo view_create_info = {};
+    view_create_info.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+    view_create_info.image = image;
+    view_create_info.viewType = VK_IMAGE_VIEW_TYPE_2D;
+    view_create_info.format = resolve_dest_uint_format;
+    view_create_info.components = {
+        VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY,
+        VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY};
+    view_create_info.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    VkImageView storage_view = VK_NULL_HANDLE;
+    if (dfn.vkCreateImageView(device, &view_create_info, nullptr,
+                              &storage_view) == VK_SUCCESS) {
+      vulkan_texture->SetResolveDestStorageView(storage_view);
+      resolve_dest_textures_[key.base_page << 12] = vulkan_texture;
+    } else {
+      XELOGW(
+          "VulkanTextureCache: failed to create the resolve-to-texture storage "
+          "view; this texture keeps the upload path");
+    }
+  }
+  return std::unique_ptr<Texture>(vulkan_texture);
+}
+
+VulkanTextureCache::VulkanTexture*
+VulkanTextureCache::FindResolveDestTexture(uint32_t base,
+                                           uint32_t* base_delta_out) const {
+  // Strips advance the base and ranges overlap; take the closest preceding
+  // base deterministically.
+  VulkanTexture* best = nullptr;
+  uint32_t best_base = 0;
+  for (const auto& pair : resolve_dest_textures_) {
+    VulkanTexture* texture = pair.second;
+    if (!texture) {
+      continue;
+    }
+    uint32_t texture_size = std::max(texture->GetGuestBaseSize(), uint32_t(1));
+    if (base >= pair.first && base < pair.first + texture_size) {
+      if (!best || pair.first > best_base) {
+        best = texture;
+        best_base = pair.first;
+      }
+    }
+  }
+  if (base_delta_out) {
+    *base_delta_out = best ? base - best_base : 0;
+  }
+  return best;
+}
+
+
+VkImageView VulkanTextureCache::GetResolveDestStorageView(
+    uint32_t base, uint32_t* base_delta_out,
+    ResolveDestTextureInfo* info_out) const {
+  VulkanTexture* texture = FindResolveDestTexture(base, base_delta_out);
+  if (!texture) {
+    return VK_NULL_HANDLE;
+  }
+  if (info_out) {
+    const TextureKey& key = texture->key();
+    info_out->width = key.GetWidth();
+    info_out->height = key.GetHeight();
+    info_out->pitch = key.pitch;
+    info_out->format = uint32_t(key.format);
+  }
+  return texture->resolve_dest_storage_view();
+}
+
+void VulkanTextureCache::MarkResolveDestWritten(uint32_t base,
+                                                uint64_t frame) {
+  if (VulkanTexture* texture = FindResolveDestTexture(base)) {
+    texture->SetResolveDestWrittenFrame(frame);
+  }
+}
+
+bool VulkanTextureCache::TryServeFromResolveDest(const VulkanTexture& texture,
+                                                 bool load_base,
+                                                 bool load_mips) const {
+  if (!cvars::vulkan_resolve_to_texture_serve) {
+    return false;
+  }
+  if (texture.resolve_dest_storage_view() == VK_NULL_HANDLE) {
+    return false;
+  }
+  const TextureKey& key = texture.key();
+  // Mips are genuine guest data and are never host-generated for unscaled
+  // textures - never serve them from a resolve.
+  if (load_mips || key.mip_max_level || key.packed_mips || key.scaled_resolve) {
+    return false;
+  }
+  if (!load_base) {
+    return false;
+  }
+  // The resolve must structurally match, and have covered the whole base level.
+  if (!IsResolveDestEligible(texture)) {
+    return false;
+  }
+  // The resolve must have run this frame - a stale image is not a substitute.
+  if (texture.resolve_dest_written_frame() !=
+      command_processor_.GetCurrentFrame()) {
+    return false;
+  }
+  // And the CPU must not have written the range since.
+  if (!shared_memory().IsRangeGpuWritten(
+          key.base_page << 12,
+          std::max(texture.GetGuestBaseSize(), uint32_t(1)))) {
+    return false;
+  }
+  return true;
+}
+
+void VulkanTextureCache::NoteResolveDestination(
+    const ResolveDestDescriptor& desc) {
+  resolve_dests_[resolve_dests_next_ % kResolveDestHistory] = desc;
+  ++resolve_dests_next_;
+}
+
+bool VulkanTextureCache::ShouldPromoteToResolveDest(
+    const TextureKey& key) const {
+  if (!cvars::vulkan_resolve_to_texture_promote) {
+    return false;
+  }
+  // Structural match only - coverage is a per-frame property checked when the
+  // texture is actually served, not when it is created.
+  for (const auto& d : resolve_dests_) {
+    if (!d.pitch_div_32 && !d.width && !d.height) {
+      continue;
+    }
+    if ((key.base_page << 12) != d.base || key.pitch != d.pitch_div_32) {
+      continue;
+    }
+    if (!key.tiled || key.packed_mips || key.mip_max_level) {
+      continue;
+    }
+    if (key.dimension != xenos::DataDimension::k2DOrStacked || d.is_array) {
+      continue;
+    }
+    if (key.format != GetBaseFormat(xenos::TextureFormat(d.format))) {
+      continue;
+    }
+    if (d.endian >= 4 || uint32_t(key.endianness) != d.endian) {
+      continue;
+    }
+    return true;
+  }
+  return false;
+}
+
+// A structural match against a recent resolve destination, plus proof that the
+// resolves actually covered every guest byte the upload would read.
+bool VulkanTextureCache::IsResolveDestEligible(const Texture& texture) const {
+  const TextureKey& key = texture.key();
+  const uint32_t texture_base = key.base_page << 12;
+  const uint32_t texture_size =
+      std::max(texture.GetGuestBaseSize(), uint32_t(1));
+  for (const auto& d : resolve_dests_) {
+    if (!d.pitch_div_32 && !d.width && !d.height) {
+      continue;  // unused ring slot
+    }
+    // Strip bases advance past the texture's; match by containment.
+    if (d.base < texture_base || d.base >= texture_base + texture_size ||
+        key.pitch != d.pitch_div_32) {
+      continue;
+    }
+    if (!key.tiled || key.packed_mips || key.mip_max_level) {
+      continue;
+    }
+    if (key.dimension != xenos::DataDimension::k2DOrStacked || d.is_array) {
+      continue;
+    }
+    if (key.format != GetBaseFormat(xenos::TextureFormat(d.format))) {
+      continue;
+    }
+    if (d.endian >= 4 || uint32_t(key.endianness) != d.endian) {
+      continue;
+    }
+    return ResolveDestsCoverSurface(
+        texture_base, texture_size, d.pitch_div_32, key.GetWidth(),
+        key.GetHeight(),
+        static_cast<const VulkanTexture&>(texture)
+            .resolve_dest_written_frame());
+  }
+  return false;
+}
+
+// A byte union misses the unwritten columns of sub-rectangle resolves, so
+// require full-width resolves to cover every row.
+bool VulkanTextureCache::ResolveDestsCoverSurface(uint32_t base,
+                                                  uint32_t size_bytes,
+                                                  uint32_t pitch_div_32,
+                                                  uint32_t width,
+                                                  uint32_t height,
+                                                  uint64_t frame) const {
+  if (!width || !height) {
+    return false;
+  }
+  struct Span {
+    uint32_t begin, end;
+  };
+  Span spans[kResolveDestHistory];
+  uint32_t span_count = 0;
+  for (const auto& d : resolve_dests_) {
+    if (!d.width || !d.height || d.frame != frame) {
+      continue;
+    }
+    // Strips advance the base, so accept any resolve inside the surface.
+    if (d.base < base || d.base >= base + size_bytes ||
+        d.pitch_div_32 != pitch_div_32) {
+      continue;
+    }
+    // Partial width leaves columns unwritten - it can never contribute.
+    if (d.x0 != 0 || d.width < width) {
+      continue;
+    }
+    Span span{d.y0, d.y0 + d.height};
+    uint32_t i = 0;
+    while (i < span_count && spans[i].begin < span.begin) {
+      ++i;
+    }
+    for (uint32_t j = span_count; j > i; --j) {
+      spans[j] = spans[j - 1];
+    }
+    spans[i] = span;
+    ++span_count;
+  }
+  uint32_t covered_to = 0;
+  for (uint32_t i = 0; i < span_count && covered_to < height; ++i) {
+    if (spans[i].begin > covered_to) {
+      return false;  // gap
+    }
+    covered_to = std::max(covered_to, spans[i].end);
+  }
+  return covered_to >= height;
 }
 
 bool VulkanTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
                                                                bool load_base,
                                                                bool load_mips) {
+  if (TryServeFromResolveDest(static_cast<const VulkanTexture&>(texture),
+                              load_base, load_mips)) {
+    return true;
+  }
   VulkanTexture& vulkan_texture = static_cast<VulkanTexture&>(texture);
   TextureKey texture_key = vulkan_texture.key();
 
@@ -1369,6 +1697,16 @@ bool VulkanTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
         level_guest_z_extent_texels;
     host_buffer_size += level_host_layout.slice_size_bytes * array_size;
   }
+  // Eligible but created before any resolve targeted it, so it has no storage
+  // view. Queue it for recreation - otherwise a texture that is never
+  // naturally recreated can never be promoted.
+  if (cvars::vulkan_resolve_to_texture_promote &&
+      vulkan_texture.resolve_dest_storage_view() == VK_NULL_HANDLE &&
+      resolve_dest_promotion_queue_.size() < 64 &&
+      IsResolveDestEligible(texture)) {
+    resolve_dest_promotion_queue_.push_back(texture.key());
+  }
+
   VulkanCommandProcessor::ScratchBufferAcquisition scratch_buffer_acquisition(
       command_processor_.AcquireScratchGpuBuffer(
           host_buffer_size, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
@@ -1682,7 +2020,7 @@ bool VulkanTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
             offsetof(LoadConstants, host_offset),
             sizeof(load_constants.host_offset), &load_constants.host_offset);
       }
-      command_processor_.SubmitBarriers(true);
+  command_processor_.SubmitBarriers(true);
       // Debug: show dispatch info with source offset
       command_processor_.InsertDebugMarker(
           "Dispatch: guest_off=0x%X host_off=0x%X groups=%ux%ux%u",
@@ -1949,6 +2287,14 @@ VulkanTextureCache::VulkanTexture::~VulkanTexture() {
       vulkan_texture_cache.command_processor_.GetVulkanDevice();
   const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
   const VkDevice device = vulkan_device->device();
+  if (resolve_dest_storage_view_ != VK_NULL_HANDLE) {
+    dfn.vkDestroyImageView(device, resolve_dest_storage_view_, nullptr);
+    auto& mutable_cache = const_cast<VulkanTextureCache&>(vulkan_texture_cache);
+    auto it = mutable_cache.resolve_dest_textures_.find(key().base_page << 12);
+    if (it != mutable_cache.resolve_dest_textures_.end() && it->second == this) {
+      mutable_cache.resolve_dest_textures_.erase(it);
+    }
+  }
   for (const auto& view_pair : views_) {
     dfn.vkDestroyImageView(device, view_pair.second, nullptr);
   }

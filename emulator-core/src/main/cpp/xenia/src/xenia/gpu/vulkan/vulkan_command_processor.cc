@@ -40,6 +40,7 @@
 #include "xenia/ui/vulkan/vulkan_util.h"
 
 DECLARE_bool(clear_memory_page_state);
+DECLARE_bool(vulkan_in_pass_resolve_debug_read_usage);
 DECLARE_bool(log_gpu_frame_time_breakdown);
 
 DEFINE_int32(
@@ -4416,9 +4417,11 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     // With in-pass resolves, fragment shaders may write shared memory inside
     // any guest pass - declare the write usage up front so no barrier is
     // needed at the resolve point.
-    shared_memory_->Use(render_target_cache_->local_read_attachments()
-                            ? VulkanSharedMemory::Usage::kGuestDrawReadWrite
-                            : VulkanSharedMemory::Usage::kRead);
+    shared_memory_->Use(
+        (render_target_cache_->local_read_attachments() &&
+         !cvars::vulkan_in_pass_resolve_debug_read_usage)
+            ? VulkanSharedMemory::Usage::kGuestDrawReadWrite
+            : VulkanSharedMemory::Usage::kRead);
   }
 
   // After all commands that may dispatch, copy or insert barriers, submit the

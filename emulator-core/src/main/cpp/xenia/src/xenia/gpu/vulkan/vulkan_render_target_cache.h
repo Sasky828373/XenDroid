@@ -417,6 +417,20 @@ class VulkanRenderTargetCache final : public RenderTargetCache {
   const Framebuffer* last_update_framebuffer_ = VK_NULL_HANDLE;
 
   bool local_read_attachments_ = false;
+  uint64_t inpass_attempts_ = 0;
+  uint64_t inpass_taken_ = 0;
+  uint64_t inpass_stores_ = 0;
+  uint64_t inpass_store_refused_ = 0;
+  uint64_t inpass_refuse_pitch_ = 0;
+  uint64_t inpass_refuse_format_ = 0;
+  uint64_t inpass_refuse_bounds_ = 0;
+  uint64_t inpass_format_hist_[16] = {};
+  static constexpr uint32_t kInPassRejectReasons = 24;
+  const char* inpass_reject_reasons_[kInPassRejectReasons] = {};
+  uint64_t inpass_reject_counts_[kInPassRejectReasons] = {};
+  uint32_t inpass_reject_reason_count_ = 0;
+  uint32_t inpass_combos_[16] = {};
+  uint32_t inpass_combo_count_ = 0;
   bool use_dynamic_rendering_ = false;
   VkPipelineStageFlags color_draw_stage_mask_ =
       VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;

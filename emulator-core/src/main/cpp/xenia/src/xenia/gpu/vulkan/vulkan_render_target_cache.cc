@@ -38,6 +38,31 @@ DECLARE_bool(rt_cache_ownership_claim_memo);
 DECLARE_bool(vulkan_dynamic_rendering);
 
 DEFINE_bool(
+    vulkan_in_pass_resolve_debug_read_usage, false,
+    "DEBUG probe: declare shared memory as kRead rather than "
+    "kGuestDrawReadWrite for guest passes even when local-read attachments "
+    "are enabled. kRead covers COMPUTE/TRANSFER stages that "
+    "kGuestDrawReadWrite does not.",
+    "Vulkan");
+DEFINE_int32(
+    vulkan_in_pass_resolve_debug_reject, 0,
+    "DEBUG probe bitmask: 1 = reject multisampled sources, 2 = reject "
+    "single-sampled sources. For bisecting which resolve population "
+    "carries an artifact.",
+    "Vulkan");
+DEFINE_int32(
+    vulkan_in_pass_resolve_debug_exp_bias, 0,
+    "DEBUG probe: add this to the destination exponent bias of in-pass "
+    "resolves only. Nonzero must visibly change the image if their output "
+    "is consumed; identical output means the data is not the conduit.",
+    "Vulkan");
+DEFINE_bool(
+    vulkan_in_pass_resolve_debug_dump, false,
+    "DEBUG probe: still dump the owning render targets to the EDRAM buffer "
+    "when a resolve was performed in-pass, to test whether skipping the "
+    "dump is what a title misses.",
+    "Vulkan");
+DEFINE_bool(
     vulkan_resolve_to_texture, true,
     "Have the in-pass resolve also store its result straight into the promoted "
     "destination texture, so vulkan_resolve_to_texture_serve can skip the "
@@ -1677,10 +1702,16 @@ bool VulkanRenderTargetCache::TryInPassResolveCopy(
     VulkanSharedMemory& shared_memory, VulkanTextureCache& texture_cache,
     uint32_t& written_address_out, uint32_t& written_length_out) {
   auto reject = [&](const char* reason) {
-    static std::atomic<uint32_t> logged{0};
-    if (cvars::log_resolve_details &&
-        logged.fetch_add(1, std::memory_order_relaxed) < 64) {
-      XELOGI("InPassResolve reject: {}", reason);
+    for (uint32_t i = 0; i < inpass_reject_reason_count_; ++i) {
+      if (inpass_reject_reasons_[i] == reason) {
+        ++inpass_reject_counts_[i];
+        return false;
+      }
+    }
+    if (inpass_reject_reason_count_ < kInPassRejectReasons) {
+      inpass_reject_reasons_[inpass_reject_reason_count_] = reason;
+      inpass_reject_counts_[inpass_reject_reason_count_] = 1;
+      ++inpass_reject_reason_count_;
     }
     return false;
   };
@@ -1690,6 +1721,12 @@ bool VulkanRenderTargetCache::TryInPassResolveCopy(
   }
   if (!command_processor_.in_render_pass()) {
     return reject("no pass open");
+  }
+  // Multisampled sources resolve dark through this path, cause not yet known.
+  if (xenos::MsaaSamples(uint32_t(
+          resolve_info.color_edram_info.msaa_samples)) !=
+      xenos::MsaaSamples::k1X) {
+    return reject("multisampled source");
   }
   // Bitwise-equivalent color copies: single-sample selects, and at 2x also
   // the two-sample average. copy_dest_exp_bias is applied in-shader.
@@ -1719,7 +1756,7 @@ bool VulkanRenderTargetCache::TryInPassResolveCopy(
   }
   xenos::MsaaSamples resolve_msaa = resolve_info.color_edram_info.msaa_samples;
   if (resolve_msaa > xenos::MsaaSamples::k2X) {
-    return false;
+    return reject("4x source");
   }
   uint32_t sample_select = uint32_t(
       resolve_info.copy_dest_coordinate_info.copy_sample_select);
@@ -1759,12 +1796,58 @@ bool VulkanRenderTargetCache::TryInPassResolveCopy(
   if (rt_key.GetColorFormat() != resolve_color_format) {
     return reject("source format mismatch");
   }
-  // Float16 sources are sampled through the SFLOAT attachment view, so the
-  // round-trip is not bit-exact; leave them to the UINT transfer-view path.
+  // The exp-bias multiply runs these through fp32, losing NaN payloads and
+  // denormals. Unorm and snorm roundtrips are lossless, so they pass.
   if (resolve_color_format == xenos::ColorRenderTargetFormat::k_16_16_FLOAT ||
       resolve_color_format ==
-          xenos::ColorRenderTargetFormat::k_16_16_16_16_FLOAT) {
-    return reject("float16 needs the uint transfer view");
+          xenos::ColorRenderTargetFormat::k_16_16_16_16_FLOAT ||
+      resolve_color_format == xenos::ColorRenderTargetFormat::k_32_FLOAT ||
+      resolve_color_format ==
+          xenos::ColorRenderTargetFormat::k_32_32_FLOAT) {
+    return reject("float source: specials not preserved");
+  }
+  if (cvars::vulkan_in_pass_resolve_debug_reject) {
+    const bool is_msaa = xenos::MsaaSamples(uint32_t(
+        resolve_info.color_edram_info.msaa_samples)) !=
+        xenos::MsaaSamples::k1X;
+    if ((cvars::vulkan_in_pass_resolve_debug_reject & (is_msaa ? 1 : 2))) {
+      return reject("debug reject mask");
+    }
+  }
+  inpass_format_hist_[uint32_t(resolve_color_format) & 15]++;
+  {
+    const uint32_t combo =
+        (uint32_t(resolve_color_format) & 15) |
+        ((uint32_t(resolve_info.copy_dest_info.copy_dest_format) & 63) << 4) |
+        ((uint32_t(resolve_info.copy_dest_info.copy_dest_exp_bias) & 63)
+         << 10) |
+        (uint32_t(resolve_info.copy_dest_info.copy_dest_swap) << 16) |
+        (uint32_t(resolve_info.color_edram_info.msaa_samples) << 17) |
+        (uint32_t(resolve_info.copy_dest_coordinate_info.copy_sample_select)
+         << 19);
+    bool seen = false;
+    for (uint32_t i = 0; i < inpass_combo_count_; ++i) {
+      if (inpass_combos_[i] == combo) {
+        seen = true;
+        break;
+      }
+    }
+    if (!seen && inpass_combo_count_ < 16) {
+      inpass_combos_[inpass_combo_count_++] = combo;
+      XELOGI(
+          "VkInPassCombo: src_fmt={} dest_fmt={} exp_bias={} swap={} "
+          "src64={} rect={}x{} msaa={} sel={}",
+          uint32_t(resolve_color_format),
+          uint32_t(resolve_info.copy_dest_info.copy_dest_format),
+          int32_t(resolve_info.copy_dest_info.copy_dest_exp_bias),
+          uint32_t(resolve_info.copy_dest_info.copy_dest_swap),
+          uint32_t(rt_key.Is64bpp()),
+          resolve_info.coordinate_info.width_div_8 << 3,
+          resolve_info.height_div_8 << 3,
+          uint32_t(resolve_info.color_edram_info.msaa_samples),
+          uint32_t(
+              resolve_info.copy_dest_coordinate_info.copy_sample_select));
+    }
   }
   RenderPassKey render_pass_key = last_update_render_pass_key();
   RenderTarget* const* accumulated = last_update_accumulated_render_targets();
@@ -1792,7 +1875,7 @@ bool VulkanRenderTargetCache::TryInPassResolveCopy(
   uint32_t width = resolve_info.coordinate_info.width_div_8 << 3;
   uint32_t height = resolve_info.height_div_8 << 3;
   if (!width || !height) {
-    return false;
+    return reject("empty rect");
   }
   // EDRAM sample space: at 2x the sample rows are the pixel rows doubled plus
   // the selected sample; the host image is pixel-dimensioned with the sample
@@ -1802,17 +1885,20 @@ bool VulkanRenderTargetCache::TryInPassResolveCopy(
   uint32_t rt_base_tiles = rt_key.base_tiles;
   uint32_t rt_pitch_tiles = rt_key.GetPitchTiles();
   int64_t offset_x = INT64_MAX, offset_y = INT64_MAX;
-  const uint32_t corner_pxs[] = {0, width - 1};
-  const uint32_t corner_pys[] = {0, height - 1};
-  for (uint32_t cy = 0; cy < 2; ++cy) {
-    for (uint32_t cx = 0; cx < 2; ++cx) {
-      uint32_t px = corner_pxs[cx], py = corner_pys[cy];
+  // The tile walk is linear only within a tile, so corners agreeing says
+  // nothing about the interior. Check every tile the rect covers.
+  const uint32_t tiles_x = (width + tile_size_x - 1) / tile_size_x;
+  const uint32_t tiles_y = (height + kTileSizeY - 1) / kTileSizeY;
+  for (uint32_t ty = 0; ty <= tiles_y; ++ty) {
+    uint32_t py = std::min(ty * kTileSizeY, height - 1);
+    for (uint32_t tx = 0; tx <= tiles_x; ++tx) {
+      uint32_t px = std::min(tx * tile_size_x, width - 1);
       uint32_t sx = px + pixel_x0;
       uint32_t sy = ((py + pixel_y0) << sample_y_log2) + sample_y_offset;
       uint32_t tile_x = sx / tile_size_x, tile_y = sy / kTileSizeY;
       uint32_t nonwrapped = dump_base + tile_y * dump_pitch + tile_x;
       if (nonwrapped < rt_base_tiles) {
-        return false;
+        return reject("tile before rt base");
       }
       uint32_t linear = nonwrapped - rt_base_tiles;
       uint32_t rt_tile_y = linear / rt_pitch_tiles;
@@ -1825,7 +1911,7 @@ bool VulkanRenderTargetCache::TryInPassResolveCopy(
       int64_t host_y = texel_y >> sample_y_log2;
       int64_t corner_offset_x = int64_t(px) - host_x;
       int64_t corner_offset_y = int64_t(py) - host_y;
-      if (cx == 0 && cy == 0) {
+      if (offset_x == INT64_MAX) {
         offset_x = corner_offset_x;
         offset_y = corner_offset_y;
       } else if (corner_offset_x != offset_x || corner_offset_y != offset_y) {
@@ -1851,20 +1937,21 @@ bool VulkanRenderTargetCache::TryInPassResolveCopy(
   // the pass (inline, non-hoistable) - re-check afterwards.
   if (!shared_memory.RequestRange(resolve_info.copy_dest_extent_start,
                                   resolve_info.copy_dest_extent_length)) {
-    return false;
+    return reject("dest range not committed");
   }
   if (!command_processor_.in_render_pass()) {
-    return false;
+    return reject("pass ended by commit");
   }
 
   // Resolve-to-texture: if a promoted texture is registered for this
   // destination, the shader also stores the packed texel straight into it.
   uint32_t resolve_dest_base_delta = 0;
+  VulkanTextureCache::ResolveDestTextureInfo resolve_dest_texture_info;
   VkImageView resolve_dest_storage_view =
       cvars::vulkan_resolve_to_texture
           ? texture_cache.GetResolveDestStorageView(
                 resolve_info.copy_dest_base_unadjusted & 0x1FFFFFFF,
-                &resolve_dest_base_delta)
+                &resolve_dest_base_delta, &resolve_dest_texture_info)
           : VK_NULL_HANDLE;
   // The base delta is an offset into a TILED surface: invert it through the
   // base granularity blocks into an (x, y) texel origin, never linear rows.
@@ -1904,12 +1991,41 @@ bool VulkanRenderTargetCache::TryInPassResolveCopy(
       resolve_dest_storage_view = VK_NULL_HANDLE;
     }
   }
+  if (resolve_dest_storage_view != VK_NULL_HANDLE) {
+    // Containment alone can match an unrelated texture over reused memory.
+    const int32_t dest_origin_x =
+        int32_t(resolve_info.copy_dest_x0) + dest_delta_x;
+    const int32_t dest_origin_y =
+        int32_t(resolve_info.copy_dest_y0) + dest_delta_y;
+    const bool pitch_bad =
+        resolve_dest_texture_info.pitch !=
+        resolve_info.copy_dest_coordinate_info.pitch_aligned_div_32;
+    const bool format_bad =
+        resolve_dest_texture_info.format !=
+        uint32_t(GetBaseFormat(xenos::TextureFormat(
+            resolve_info.copy_dest_info.copy_dest_format)));
+    // imageStore discards out-of-range writes, so overhang is harmless.
+    // Only an origin outside the texture means the match was wrong.
+    const bool bounds_bad =
+        uint32_t(dest_origin_x) >= resolve_dest_texture_info.width ||
+        uint32_t(dest_origin_y) >= resolve_dest_texture_info.height;
+    if (pitch_bad || format_bad || bounds_bad) {
+      resolve_dest_storage_view = VK_NULL_HANDLE;
+      ++inpass_store_refused_;
+      inpass_refuse_pitch_ += uint32_t(pitch_bad);
+      inpass_refuse_format_ += uint32_t(!pitch_bad && format_bad);
+      inpass_refuse_bounds_ +=
+          uint32_t(!pitch_bad && !format_bad && bounds_bad);
+    } else {
+      ++inpass_stores_;
+    }
+  }
   const bool writes_texture =
       resolve_dest_storage_view != VK_NULL_HANDLE;
   VkPipeline pipeline = GetResolveInPassPipeline(render_pass_key, color_slot,
                                                  is_64bpp, writes_texture);
   if (pipeline == VK_NULL_HANDLE) {
-    return false;
+    return reject("no pipeline");
   }
 
   const ui::vulkan::VulkanDevice* const vulkan_device =
@@ -1922,7 +2038,7 @@ bool VulkanRenderTargetCache::TryInPassResolveCopy(
           VulkanCommandProcessor::SingleTransientDescriptorLayout::
               kStorageBufferFragment);
   if (descriptor_set_dest == VK_NULL_HANDLE) {
-    return false;
+    return reject("no dest descriptor");
   }
   VkDescriptorBufferInfo dest_buffer_info;
   dest_buffer_info.buffer = shared_memory.buffer();
@@ -1961,7 +2077,7 @@ bool VulkanRenderTargetCache::TryInPassResolveCopy(
         VulkanCommandProcessor::SingleTransientDescriptorLayout::
             kStorageImageFragment);
     if (descriptor_set_texture == VK_NULL_HANDLE) {
-      return false;
+      return reject("no texture descriptor");
     }
     VkDescriptorImageInfo storage_image_info = {};
     storage_image_info.imageView = resolve_dest_storage_view;
@@ -1993,6 +2109,11 @@ bool VulkanRenderTargetCache::TryInPassResolveCopy(
     int32_t texture_origin[2];
   } push_constants;
   push_constants.base = copy_shader_constants;
+  if (cvars::vulkan_in_pass_resolve_debug_exp_bias) {
+    push_constants.base.dest_relative.dest_info.copy_dest_exp_bias =
+        push_constants.base.dest_relative.dest_info.copy_dest_exp_bias +
+        cvars::vulkan_in_pass_resolve_debug_exp_bias;
+  }
   push_constants.base.dest_base -= uint32_t(dest_buffer_info.offset);
   push_constants.frag_to_pixel_offset[0] = int32_t(offset_x);
   push_constants.frag_to_pixel_offset[1] = int32_t(offset_y);
@@ -2069,6 +2190,7 @@ bool VulkanRenderTargetCache::TryInPassResolveCopy(
     dest_desc.format = uint32_t(resolve_info.copy_dest_info.copy_dest_format);
     dest_desc.endian = uint32_t(resolve_info.copy_dest_info.copy_dest_endian);
     dest_desc.is_array = uint32_t(resolve_info.copy_dest_info.copy_dest_array);
+    dest_desc.frame = command_processor_.GetCurrentFrame();
     texture_cache.NoteResolveDestination(dest_desc);
   }
   shared_memory.MarkInPassWrite(
@@ -2561,6 +2683,41 @@ bool VulkanRenderTargetCache::Resolve(const Memory& memory,
             dump_row_length_used, dump_rows, dump_pitch, shared_memory,
             texture_cache, written_address_out, written_length_out);
         direct_host_used = copied;
+        ++inpass_attempts_;
+        inpass_taken_ += uint32_t(copied);
+        if ((inpass_attempts_ % 512) == 0) {
+          XELOGI(
+              "VkInPass: {}/{} in-pass | stores {} refused {} "
+              "(pitch {} format {} bounds {})",
+              inpass_taken_, inpass_attempts_, inpass_stores_,
+              inpass_store_refused_, inpass_refuse_pitch_,
+              inpass_refuse_format_, inpass_refuse_bounds_);
+          {
+            char fmt_line[256];
+            int fmt_len = 0;
+            for (uint32_t fi = 0; fi < 16; ++fi) {
+              if (!inpass_format_hist_[fi]) {
+                continue;
+              }
+              fmt_len += std::snprintf(fmt_line + fmt_len,
+                                       sizeof(fmt_line) - fmt_len, "%u=%llu ",
+                                       fi,
+                                       (unsigned long long)inpass_format_hist_[fi]);
+            }
+            XELOGI("VkInPassFmt: {}", fmt_line);
+          }
+          {
+            char rej_line[512];
+            int rej_len = 0;
+            for (uint32_t ri = 0; ri < inpass_reject_reason_count_; ++ri) {
+              rej_len += std::snprintf(
+                  rej_line + rej_len, sizeof(rej_line) - rej_len,
+                  "%s=%llu ", inpass_reject_reasons_[ri],
+                  (unsigned long long)inpass_reject_counts_[ri]);
+            }
+            XELOGI("VkInPassReject: {}", rej_line);
+          }
+        }
       }
       if (!copied && cvars::vulkan_direct_host_resolve &&
           copy_shader != draw_util::ResolveCopyShaderIndex::kUnknown) {
@@ -2570,7 +2727,7 @@ bool VulkanRenderTargetCache::Resolve(const Memory& memory,
             texture_cache, written_address_out, written_length_out);
         direct_host_used = copied;
       }
-      if (!copied) {
+      if (!copied || cvars::vulkan_in_pass_resolve_debug_dump) {
         DumpRenderTargets(dump_base, dump_row_length_used, dump_rows,
                           dump_pitch);
       }

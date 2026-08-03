@@ -38,14 +38,21 @@ class VulkanTextureCache final : public TextureCache {
     uint32_t format;    // xenos::ColorFormat
     uint32_t endian;    // copy_dest_info.copy_dest_endian
     uint32_t is_array;  // copy_dest_info.copy_dest_array
+    // Memory is reused across scenes, so coverage must only trust resolves
+    // from the frame being served.
+    uint64_t frame;
   };
   void NoteResolveDestination(const ResolveDestDescriptor& desc);
   // Storage view of the promoted texture an in-pass resolve to `base` should
   // fill. Large surfaces are resolved in strips, each with its own advancing
   // base, so `base_delta_out` reports how far into the texture this strip
   // starts - the caller converts it to a row offset.
-  VkImageView GetResolveDestStorageView(uint32_t base,
-                                        uint32_t* base_delta_out) const;
+  struct ResolveDestTextureInfo {
+    uint32_t width = 0, height = 0, pitch = 0, format = 0;
+  };
+  VkImageView GetResolveDestStorageView(
+      uint32_t base, uint32_t* base_delta_out,
+      ResolveDestTextureInfo* info_out) const;
   // Stamps the promoted texture at `base` as filled by a resolve this frame.
   void MarkResolveDestWritten(uint32_t base, uint64_t frame);
 
@@ -69,7 +76,7 @@ class VulkanTextureCache final : public TextureCache {
   // Whether full-width resolves have covered every row of the surface.
   bool ResolveDestsCoverSurface(uint32_t base, uint32_t size_bytes,
                                 uint32_t pitch_div_32, uint32_t width,
-                                uint32_t height) const;
+                                uint32_t height, uint64_t frame) const;
   VulkanTexture* FindResolveDestTexture(
       uint32_t base, uint32_t* base_delta_out = nullptr) const;
   bool ShouldPromoteToResolveDest(const TextureKey& key) const;

@@ -1361,9 +1361,20 @@ VulkanTextureCache::FindResolveDestTexture(uint32_t base,
 
 
 VkImageView VulkanTextureCache::GetResolveDestStorageView(
-    uint32_t base, uint32_t* base_delta_out) const {
+    uint32_t base, uint32_t* base_delta_out,
+    ResolveDestTextureInfo* info_out) const {
   VulkanTexture* texture = FindResolveDestTexture(base, base_delta_out);
-  return texture ? texture->resolve_dest_storage_view() : VK_NULL_HANDLE;
+  if (!texture) {
+    return VK_NULL_HANDLE;
+  }
+  if (info_out) {
+    const TextureKey& key = texture->key();
+    info_out->width = key.GetWidth();
+    info_out->height = key.GetHeight();
+    info_out->pitch = key.pitch;
+    info_out->format = uint32_t(key.format);
+  }
+  return texture->resolve_dest_storage_view();
 }
 
 void VulkanTextureCache::MarkResolveDestWritten(uint32_t base,
@@ -1474,8 +1485,11 @@ bool VulkanTextureCache::IsResolveDestEligible(const Texture& texture) const {
     if (d.endian >= 4 || uint32_t(key.endianness) != d.endian) {
       continue;
     }
-    return ResolveDestsCoverSurface(texture_base, texture_size, d.pitch_div_32,
-                                    key.GetWidth(), key.GetHeight());
+    return ResolveDestsCoverSurface(
+        texture_base, texture_size, d.pitch_div_32, key.GetWidth(),
+        key.GetHeight(),
+        static_cast<const VulkanTexture&>(texture)
+            .resolve_dest_written_frame());
   }
   return false;
 }
@@ -1486,7 +1500,8 @@ bool VulkanTextureCache::ResolveDestsCoverSurface(uint32_t base,
                                                   uint32_t size_bytes,
                                                   uint32_t pitch_div_32,
                                                   uint32_t width,
-                                                  uint32_t height) const {
+                                                  uint32_t height,
+                                                  uint64_t frame) const {
   if (!width || !height) {
     return false;
   }
@@ -1496,7 +1511,7 @@ bool VulkanTextureCache::ResolveDestsCoverSurface(uint32_t base,
   Span spans[kResolveDestHistory];
   uint32_t span_count = 0;
   for (const auto& d : resolve_dests_) {
-    if (!d.width || !d.height) {
+    if (!d.width || !d.height || d.frame != frame) {
       continue;
     }
     // Strips advance the base, so accept any resolve inside the surface.

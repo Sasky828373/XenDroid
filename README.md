@@ -39,7 +39,13 @@ Please check the LICENSE file under the appropriate file header and directory fo
 - Adreno GPU 740 or higher. Lower 7xx have not been tested.
 
 ## Recommended Drivers
-- You can get the drivers for your GPU [here](https://github.com/StevenMXZ/Adreno-Tools-Drivers/releases)
+- You can get the drivers for your GPU from two sources 
+  - [Whitebelyash upstream drivers](https://github.com/whitebelyash/AdrenoToolsDrivers/releases)
+    - This is a All-In-One driver for a wide range of GPUs
+  - [StevenMXZ forked drivers](https://github.com/StevenMXZ/Adreno-Tools-Drivers/releases)
+    - This one has different drivers for each GPU series
+  
+# Applying the driver
   - Check your device specs with [CPU X](https://play.google.com/store/apps/details?id=com.abs.cpu_z_advance&hl=it) to get the matching driver.
   - To apply the drivers go to **Settings** > **Vulkan** > **Custom Vulkan Driver**, then select the zip file.
 

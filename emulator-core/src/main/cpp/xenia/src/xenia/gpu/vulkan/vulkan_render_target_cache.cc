@@ -1917,16 +1917,6 @@ bool VulkanRenderTargetCache::TryInPassResolveCopy(
       VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_DEPENDENCY_BY_REGION_BIT, 1,
       &local_read_barrier, 0, nullptr, 0, nullptr);
 
-  uint32_t color_attachment_count =
-      32 - xe::lzcnt(render_pass_key.depth_and_color_used >> 1);
-  uint32_t input_attachment_indices[xenos::kMaxColorRenderTargets];
-  for (uint32_t i = 0; i < xenos::kMaxColorRenderTargets; ++i) {
-    input_attachment_indices[i] =
-        i == color_slot ? 0 : VK_ATTACHMENT_UNUSED;
-  }
-  command_buffer.CmdVkSetRenderingInputAttachmentIndices(
-      color_attachment_count, input_attachment_indices);
-
   VkDescriptorSet descriptor_set_texture = VK_NULL_HANDLE;
   if (writes_texture) {
     descriptor_set_texture = command_processor_.AllocateSingleTransientDescriptor(
@@ -2012,7 +2002,23 @@ bool VulkanRenderTargetCache::TryInPassResolveCopy(
   scissor.extent.height = height;
   command_processor_.SetScissor(scissor);
 
+  // Render-pass state, and the pass stays open, so restore identity after.
+  const uint32_t color_attachment_count =
+      32 - xe::lzcnt(render_pass_key.depth_and_color_used >> 1);
+  uint32_t input_attachment_indices[xenos::kMaxColorRenderTargets];
+  for (uint32_t i = 0; i < xenos::kMaxColorRenderTargets; ++i) {
+    input_attachment_indices[i] = i == color_slot ? 0 : VK_ATTACHMENT_UNUSED;
+  }
+  command_buffer.CmdVkSetRenderingInputAttachmentIndices(
+      color_attachment_count, input_attachment_indices);
+
   command_buffer.CmdVkDraw(3, 1, 0, 0);
+
+  for (uint32_t i = 0; i < xenos::kMaxColorRenderTargets; ++i) {
+    input_attachment_indices[i] = i;
+  }
+  command_buffer.CmdVkSetRenderingInputAttachmentIndices(
+      color_attachment_count, input_attachment_indices);
   if (writes_texture) {
     texture_cache.MarkResolveDestWritten(
         resolve_info.copy_dest_base_unadjusted & 0x1FFFFFFF,

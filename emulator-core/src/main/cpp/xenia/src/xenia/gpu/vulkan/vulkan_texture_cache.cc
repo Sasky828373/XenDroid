@@ -1334,30 +1334,12 @@ std::unique_ptr<TextureCache::Texture> VulkanTextureCache::CreateTexture(
 }
 
 VulkanTextureCache::VulkanTexture*
-VulkanTextureCache::FindResolveDestTexture(uint32_t base) const {
-  // Large surfaces are resolved in strips, each advancing copy_dest_base, so
-  // an exact-base lookup only ever finds the first strip. Match any promoted
-  // texture whose guest range contains this resolve's base - the shader's
-  // x0/y0 are absolute destination-surface coordinates, so every strip lands
-  // in the right place in the same image.
-  for (const auto& pair : resolve_dest_textures_) {
-    VulkanTexture* texture = pair.second;
-    if (!texture) {
-      continue;
-    }
-    uint32_t texture_base = pair.first;
-    uint32_t texture_size = std::max(texture->GetGuestBaseSize(), uint32_t(1));
-    if (base >= texture_base && base < texture_base + texture_size) {
-      return texture;
-    }
-  }
-  return nullptr;
-}
-
-
-VkImageView VulkanTextureCache::GetResolveDestStorageView(
-    uint32_t base, uint32_t* base_delta_out) const {
-  *base_delta_out = 0;
+VulkanTextureCache::FindResolveDestTexture(uint32_t base,
+                                           uint32_t* base_delta_out) const {
+  // Strips advance the base and ranges overlap; take the closest preceding
+  // base deterministically.
+  VulkanTexture* best = nullptr;
+  uint32_t best_base = 0;
   for (const auto& pair : resolve_dest_textures_) {
     VulkanTexture* texture = pair.second;
     if (!texture) {
@@ -1365,11 +1347,23 @@ VkImageView VulkanTextureCache::GetResolveDestStorageView(
     }
     uint32_t texture_size = std::max(texture->GetGuestBaseSize(), uint32_t(1));
     if (base >= pair.first && base < pair.first + texture_size) {
-      *base_delta_out = base - pair.first;
-      return texture->resolve_dest_storage_view();
+      if (!best || pair.first > best_base) {
+        best = texture;
+        best_base = pair.first;
+      }
     }
   }
-  return VK_NULL_HANDLE;
+  if (base_delta_out) {
+    *base_delta_out = best ? base - best_base : 0;
+  }
+  return best;
+}
+
+
+VkImageView VulkanTextureCache::GetResolveDestStorageView(
+    uint32_t base, uint32_t* base_delta_out) const {
+  VulkanTexture* texture = FindResolveDestTexture(base, base_delta_out);
+  return texture ? texture->resolve_dest_storage_view() : VK_NULL_HANDLE;
 }
 
 void VulkanTextureCache::MarkResolveDestWritten(uint32_t base,
@@ -1456,11 +1450,16 @@ bool VulkanTextureCache::ShouldPromoteToResolveDest(
 // resolves actually covered every guest byte the upload would read.
 bool VulkanTextureCache::IsResolveDestEligible(const Texture& texture) const {
   const TextureKey& key = texture.key();
+  const uint32_t texture_base = key.base_page << 12;
+  const uint32_t texture_size =
+      std::max(texture.GetGuestBaseSize(), uint32_t(1));
   for (const auto& d : resolve_dests_) {
     if (!d.pitch_div_32 && !d.width && !d.height) {
       continue;  // unused ring slot
     }
-    if ((key.base_page << 12) != d.base || key.pitch != d.pitch_div_32) {
+    // Strip bases advance past the texture's; match by containment.
+    if (d.base < texture_base || d.base >= texture_base + texture_size ||
+        key.pitch != d.pitch_div_32) {
       continue;
     }
     if (!key.tiled || key.packed_mips || key.mip_max_level) {
@@ -1475,11 +1474,59 @@ bool VulkanTextureCache::IsResolveDestEligible(const Texture& texture) const {
     if (d.endian >= 4 || uint32_t(key.endianness) != d.endian) {
       continue;
     }
-    return ResolvedRangesCover(key.base_page << 12,
-                               std::max(texture.GetGuestBaseSize(),
-                                        uint32_t(1)));
+    return ResolveDestsCoverSurface(texture_base, texture_size, d.pitch_div_32,
+                                    key.GetWidth(), key.GetHeight());
   }
   return false;
+}
+
+// A byte union misses the unwritten columns of sub-rectangle resolves, so
+// require full-width resolves to cover every row.
+bool VulkanTextureCache::ResolveDestsCoverSurface(uint32_t base,
+                                                  uint32_t size_bytes,
+                                                  uint32_t pitch_div_32,
+                                                  uint32_t width,
+                                                  uint32_t height) const {
+  if (!width || !height) {
+    return false;
+  }
+  struct Span {
+    uint32_t begin, end;
+  };
+  Span spans[kResolveDestHistory];
+  uint32_t span_count = 0;
+  for (const auto& d : resolve_dests_) {
+    if (!d.width || !d.height) {
+      continue;
+    }
+    // Strips advance the base, so accept any resolve inside the surface.
+    if (d.base < base || d.base >= base + size_bytes ||
+        d.pitch_div_32 != pitch_div_32) {
+      continue;
+    }
+    // Partial width leaves columns unwritten - it can never contribute.
+    if (d.x0 != 0 || d.width < width) {
+      continue;
+    }
+    Span span{d.y0, d.y0 + d.height};
+    uint32_t i = 0;
+    while (i < span_count && spans[i].begin < span.begin) {
+      ++i;
+    }
+    for (uint32_t j = span_count; j > i; --j) {
+      spans[j] = spans[j - 1];
+    }
+    spans[i] = span;
+    ++span_count;
+  }
+  uint32_t covered_to = 0;
+  for (uint32_t i = 0; i < span_count && covered_to < height; ++i) {
+    if (spans[i].begin > covered_to) {
+      return false;  // gap
+    }
+    covered_to = std::max(covered_to, spans[i].end);
+  }
+  return covered_to >= height;
 }
 
 bool VulkanTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,

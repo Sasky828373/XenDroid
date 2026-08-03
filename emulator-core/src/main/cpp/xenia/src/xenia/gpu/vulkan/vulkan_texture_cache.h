@@ -66,7 +66,12 @@ class VulkanTextureCache final : public TextureCache {
   size_t resolve_dests_next_ = 0;
   // Whether a resolve wrote everything the texture would be uploaded from.
   bool IsResolveDestEligible(const Texture& texture) const;
-  VulkanTexture* FindResolveDestTexture(uint32_t base) const;
+  // Whether full-width resolves have covered every row of the surface.
+  bool ResolveDestsCoverSurface(uint32_t base, uint32_t size_bytes,
+                                uint32_t pitch_div_32, uint32_t width,
+                                uint32_t height) const;
+  VulkanTexture* FindResolveDestTexture(
+      uint32_t base, uint32_t* base_delta_out = nullptr) const;
   bool ShouldPromoteToResolveDest(const TextureKey& key) const;
   // Whether the texture can be served from its resolve instead of uploaded.
   bool TryServeFromResolveDest(const VulkanTexture& texture, bool load_base,

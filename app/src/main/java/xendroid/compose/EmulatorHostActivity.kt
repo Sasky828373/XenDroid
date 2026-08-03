@@ -12,6 +12,7 @@ import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.SurfaceHolder
 import android.view.SurfaceView
+import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
@@ -207,6 +208,8 @@ class EmulatorHostActivity : ComponentActivity(), SurfaceHolder.Callback {
     /** Edge-to-edge immersive: hides the status AND navigation bars, with the
      *  bars swipe-to-reveal transiently. */
     private fun enterImmersiveMode() {
+        // Gamepad play produces no touch events, so the display still times out.
+        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         WindowCompat.setDecorFitsSystemWindows(window, false)
         WindowInsetsControllerCompat(window, window.decorView).apply {
             systemBarsBehavior =

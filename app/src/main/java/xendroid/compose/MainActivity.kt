@@ -1,5 +1,6 @@
 package xendroid.compose
 
+import android.content.Intent
 import android.os.Bundle
 import android.util.Log
 import androidx.activity.ComponentActivity
@@ -12,6 +13,9 @@ import androidx.compose.runtime.setValue
 import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.launch
 import xendroid.compose.core.EmulatorRuntime
+import xendroid.compose.core.FrontendLaunch
+import xendroid.compose.ui.library.ACTION_LAUNCH_GAME
+import xendroid.compose.ui.library.EXTRA_GAME_URI
 import xendroid.compose.core.SessionLogs
 import xendroid.compose.ui.AppNavHost
 import xendroid.compose.ui.theme.xendroidTheme
@@ -39,6 +43,19 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
+        // Same intent shape as the in-app launch, which routes through the
+        // manifest filter into the host's own task. Finishing here instead
+        // collapses that task and the emulator is paused before it draws.
+        val frontendGame = FrontendLaunch.resolveGamePath(this, intent)
+        if (frontendGame != null) {
+            startActivity(
+                Intent(ACTION_LAUNCH_GAME).apply {
+                    setPackage(packageName)
+                    putExtra(EXTRA_GAME_URI, frontendGame)
+                }
+            )
+        }
+
         if (!sessionRotated.getAndSet(true)) {
             val appContext = applicationContext
 
@@ -60,6 +77,7 @@ class MainActivity : ComponentActivity() {
                 AppNavHost(container)
 
                 LaunchedEffect(Unit) {
+                    if (frontendGame != null) return@LaunchedEffect
                     if (!shouldCheckForUpdates(applicationContext)) {
                         Log.d("Updater", "Skipping update check (less than 5 minutes)")
                           updateResult = UpdateResult.Cooldown(getRemainingCooldown(applicationContext))

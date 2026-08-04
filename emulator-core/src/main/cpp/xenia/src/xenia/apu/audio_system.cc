@@ -35,6 +35,8 @@
 // and let the normal AudioSystem handling take it, to prevent duplicate
 // implementations. They can be found in xboxkrnl_audio_xma.cc
 
+DECLARE_bool(apu_aaudio_log_stats);
+
 DEFINE_uint32(apu_max_queued_frames, 8,
               "Allows changing max buffered audio frames to reduce audio "
               "delay. Lowering this value might cause performance issues. "
@@ -100,8 +102,33 @@ void AudioSystem::WorkerThreadMain() {
   // Initialize driver and ringbuffer.
   Initialize();
 
+  // How much of the block budget the wait-any poll loop is eating. A block is
+  // 5.33ms and desktop waits in the kernel, so this is Android only cost.
+  auto stats_last = std::chrono::steady_clock::now();
+  uint64_t stats_calls = 0, stats_iters = 0, stats_park_ns = 0;
+
   // Main run loop.
   while (worker_running_) {
+    if (cvars::apu_aaudio_log_stats) {
+      const auto now = std::chrono::steady_clock::now();
+      if (now - stats_last >= std::chrono::seconds(1)) {
+        uint64_t calls = 0, iters = 0, park_ns = 0;
+        xe::threading::GetWaitAnyStats(&calls, &iters, &park_ns);
+        const uint64_t d_calls = calls - stats_calls;
+        const uint64_t d_iters = iters - stats_iters;
+        const uint64_t d_park = park_ns - stats_park_ns;
+        XELOGI(
+            "AudioWait: {} waits, {} poll iters ({:.2f} per wait), parked "
+            "{:.1f}ms/s ({:.1f}% of wall)",
+            d_calls, d_iters,
+            d_calls ? double(d_iters) / double(d_calls) : 0.0,
+            double(d_park) / 1e6, double(d_park) / 1e7);
+        stats_calls = calls;
+        stats_iters = iters;
+        stats_park_ns = park_ns;
+        stats_last = now;
+      }
+    }
     // These handles signify the number of submitted samples. Once we reach
     // 64 samples, we wait until our audio backend releases a semaphore
     // (signaling a sample has finished playing)

@@ -369,6 +369,12 @@ bool SetTlsValue(TlsHandle handle, uintptr_t value) {
 
 // Multi-object waits: each signal bumps a generation and notifies this
 // condvar so WaitMultiple wakes at once; the timeout cap covers a miss.
+// Diagnostics: how much a thread spends going round the wait-any poll loop.
+// Windows has one kernel wait here, so this cost is Android specific.
+thread_local uint64_t t_wait_any_calls = 0;
+thread_local uint64_t t_wait_any_iters = 0;
+thread_local uint64_t t_wait_any_park_ns = 0;
+
 static std::mutex g_multi_wait_mutex;
 static std::condition_variable g_multi_wait_cv;
 static std::atomic<uint64_t> g_multi_wait_gen{0};
@@ -464,6 +470,7 @@ class PosixConditionBase {
       std::vector<PosixConditionBase*>&& handles, bool wait_all,
       std::chrono::milliseconds timeout) {
     assert_true(!handles.empty());
+    ++t_wait_any_calls;
 
     // For single handle, just use the normal Wait path.
     if (handles.size() == 1) {
@@ -589,6 +596,8 @@ class PosixConditionBase {
       auto remaining =
           std::chrono::duration_cast<std::chrono::milliseconds>(end_time - now);
       auto park = std::min(remaining, std::chrono::milliseconds(1));
+      ++t_wait_any_iters;
+      const auto park_begin = std::chrono::steady_clock::now();
       g_multi_waiters.fetch_add(1, std::memory_order_release);
       {
         std::unique_lock<std::mutex> mw_lock(g_multi_wait_mutex);
@@ -597,6 +606,10 @@ class PosixConditionBase {
         });
       }
       g_multi_waiters.fetch_sub(1, std::memory_order_release);
+      t_wait_any_park_ns += static_cast<uint64_t>(
+          std::chrono::duration_cast<std::chrono::nanoseconds>(
+              std::chrono::steady_clock::now() - park_begin)
+              .count());
     }
   }
 
@@ -2103,6 +2116,12 @@ static void signal_handler(int signal, siginfo_t* info, void* /*context*/) {
     default:
       assert_always();
   }
+}
+
+void GetWaitAnyStats(uint64_t* calls, uint64_t* iters, uint64_t* park_ns) {
+  *calls = t_wait_any_calls;
+  *iters = t_wait_any_iters;
+  *park_ns = t_wait_any_park_ns;
 }
 
 }  // namespace threading

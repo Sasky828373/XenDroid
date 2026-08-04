@@ -385,9 +385,8 @@ static void PokeMultiWaiters() {
   // so it cannot miss this.
   g_multi_wait_gen.fetch_add(1, std::memory_order_release);
   if (g_multi_waiters.load(std::memory_order_acquire) == 0) {
-    // Nobody is parked, so skip the process-global mutex entirely. This path
-    // runs from the realtime audio callback, where blocking on a lock held by
-    // an ordinary guest thread costs an audio deadline.
+    // Skip the process-global mutex: this runs from the realtime audio
+    // callback, where blocking behind a guest thread costs an audio deadline.
     return;
   }
   // Notified without holding the mutex, so a realtime caller never blocks on
@@ -460,10 +459,9 @@ class PosixConditionBase {
     return Wait(timeout);
   }
 
-  // Wake this object's waiters, and parked WaitMultiple threads only if one
-  // is actually watching this object. The shared condvar is a notify_all, so
-  // poking it for an object nobody multi-waits on wakes every parked thread
-  // to re-check handles it does not care about.
+  // The shared condvar is a notify_all, so poking it for an object nobody
+  // multi-waits on wakes every parked thread to re-check handles it does not
+  // care about.
   void NotifyAll() {
     cond_.notify_all();
     if (multi_wait_refs_.load(std::memory_order_acquire) != 0) {

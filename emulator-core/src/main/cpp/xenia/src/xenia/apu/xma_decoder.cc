@@ -16,6 +16,10 @@
 #include "xenia/apu/xma_context_old.h"
 
 #include "xenia/base/cvar.h"
+#if XE_PLATFORM_xendroid
+#include <sys/resource.h>
+#endif
+
 #include "xenia/base/logging.h"
 #include "xenia/base/math.h"
 #include "xenia/base/profiling.h"
@@ -197,6 +201,12 @@ X_STATUS XmaDecoder::Setup(kernel::KernelState* kernel_state) {
 }
 
 void XmaDecoder::WorkerThreadMain() {
+
+#if XE_PLATFORM_xendroid
+  // Set here, not at the creation site: XThread applies its own priority
+  // after Create, and its kNormal maps to nice 4, below the Android default.
+  setpriority(PRIO_PROCESS, 0, -12);
+#endif
   while (worker_running_) {
     // Okay, let's loop through XMA contexts to find ones we need to decode!
     bool did_work = false;

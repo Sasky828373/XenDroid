@@ -14,6 +14,10 @@
 #include "xenia/apu/xma_decoder.h"
 #include "xenia/base/assert.h"
 #include "xenia/base/byte_stream.h"
+#if XE_PLATFORM_xendroid
+#include <sys/resource.h>
+#endif
+
 #include "xenia/base/logging.h"
 #include "xenia/base/math.h"
 #include "xenia/base/profiling.h"
@@ -101,6 +105,12 @@ X_STATUS AudioSystem::Setup(kernel::KernelState* kernel_state) {
 void AudioSystem::WorkerThreadMain() {
   // Initialize driver and ringbuffer.
   Initialize();
+
+#if XE_PLATFORM_xendroid
+  // Set here, not at the creation site: XThread applies its own priority
+  // after Create, and its kNormal maps to nice 4, below the Android default.
+  setpriority(PRIO_PROCESS, 0, -12);
+#endif
 
   // How much of the block budget the wait-any poll loop is eating. A block is
   // 5.33ms and desktop waits in the kernel, so this is Android only cost.

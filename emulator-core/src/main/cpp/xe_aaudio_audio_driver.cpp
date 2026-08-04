@@ -114,10 +114,9 @@ bool AAudioAudioDriver::BuildStream() {
       continue;
     }
 
-    // The granted burst is what matters, not what was requested. Size against
-    // the larger of burst and the granted callback: a device can burst at 96
-    // yet call back for 256, and sizing on the burst alone leaves less than
-    // two callbacks of headroom, so any jitter underruns.
+    // Size against the larger of burst and granted callback: a device can
+    // burst at 96 yet call back for 256, leaving under two callbacks of
+    // headroom if only the burst is used.
     const int32_t burst = AAudioStream_getFramesPerBurst(stream_);
     const int32_t callback_frames =
         AAudioStream_getFramesPerDataCallback(stream_);
@@ -188,10 +187,9 @@ aaudio_data_callback_result_t AAudioAudioDriver::AudioCallback(
 
   driver->stat_callbacks_.fetch_add(1, std::memory_order_relaxed);
 
-  // Fill the whole request, however many guest blocks that takes. The device
-  // is free to ask for a size other than channel_samples_, and emitting a
-  // single block per callback would either pad with silence or throw the
-  // remainder of a block away.
+  // Fill the whole request, however many guest blocks that takes: a callback
+  // size other than channel_samples_ would otherwise pad with silence or
+  // discard the rest of a block.
   int32_t frames_done = 0;
   uint32_t releases = 0;
   bool gapped = false;
@@ -246,9 +244,8 @@ aaudio_data_callback_result_t AAudioAudioDriver::AudioCallback(
     frames_done += chunk;
   }
 
-  // One tick per block actually consumed, so pacing does not drift when the
-  // callback size is not a whole block. On an underrun tick once anyway, to
-  // keep the guest audio engine running.
+  // One tick per block consumed, so pacing holds when the callback size is
+  // not a whole block. Tick once on underrun to keep the guest engine running.
   if (releases == 0 && gapped) {
     releases = 1;
   }

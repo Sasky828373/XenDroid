@@ -96,6 +96,9 @@ class AAudioAudioDriver : public AudioDriver {
   // gap, a ~187Hz click train at a 5.3ms block. Callback thread only.
   float last_block_[host_block_samples_] = {};
   bool last_block_valid_ = false;
+  // Frames of last_block_ already handed to the device. A callback size that
+  // is not exactly channel_samples_ would otherwise drop or duplicate audio.
+  uint32_t last_block_pos_ = channel_samples_;
   uint32_t gap_blocks_ = 0;
 
   bool fade_in_pending_ = false;

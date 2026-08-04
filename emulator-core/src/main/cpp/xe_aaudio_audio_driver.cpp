@@ -114,11 +114,19 @@ bool AAudioAudioDriver::BuildStream() {
       continue;
     }
 
-    // The granted burst is what matters, not what was requested.
+    // The granted burst is what matters, not what was requested. Size against
+    // the larger of burst and the granted callback: a device can burst at 96
+    // yet call back for 256, and sizing on the burst alone leaves less than
+    // two callbacks of headroom, so any jitter underruns.
     const int32_t burst = AAudioStream_getFramesPerBurst(stream_);
-    if (burst > 0) {
+    const int32_t callback_frames =
+        AAudioStream_getFramesPerDataCallback(stream_);
+    const int32_t drain = std::max(
+        burst, callback_frames > 0 ? callback_frames
+                                   : static_cast<int32_t>(channel_samples_));
+    if (drain > 0) {
       AAudioStream_setBufferSizeInFrames(
-          stream_, burst * cvars::apu_aaudio_buffer_bursts);
+          stream_, drain * cvars::apu_aaudio_buffer_bursts);
     }
 
     // Requested and granted config frequently differ.

@@ -45,6 +45,16 @@ DEFINE_bool(
 DECLARE_bool(precise_interpolation);
 
 DEFINE_bool(
+    spirv_switch_case_jump_fallthrough, false,
+    "Re-enter the main loop instead of falling through into the next control "
+    "flow block, working around an NVIDIA shader compiler bug that turns an "
+    "OpSwitch case fall-through into a non-terminating loop. Costs a loop "
+    "iteration and a switch dispatch at every block boundary a shader used to "
+    "run straight through, which is expensive where fragment shading is the "
+    "bottleneck.",
+    "GPU");
+
+DEFINE_bool(
     spirv_moltenvk_allow_contraction, true,
     "When translating SPIR-V for MoltenVK, omit NoContraction decorations so "
     "SPIRV-Cross doesn't emit MSL NoContraction helper wrappers with "
@@ -1218,15 +1228,18 @@ void SpirvShaderTranslator::ProcessLabel(uint32_t cf_index) {
   new_case->addPredecessor(main_switch_header_);
   // The previous block may have already been terminated if was exece.
   if (!builder_->getBuildPoint()->isTerminated()) {
-    // Don't fall through directly into the next case block. An OpSwitch case
-    // fall-through inside the main loop makes the NVIDIA shader compiler emit a
-    // non-terminating loop. Instead re-enter the loop with this label as the
-    // program counter, like an unconditional jump to it does.
-    main_switch_next_pc_phi_operands_.push_back(
-        builder_->makeIntConstant(int(cf_index)));
-    main_switch_next_pc_phi_operands_.push_back(
-        builder_->getBuildPoint()->getId());
-    builder_->createBranch(main_loop_continue_);
+    if (cvars::spirv_switch_case_jump_fallthrough) {
+      // Re-enter the loop with this label as the program counter instead of
+      // falling through, working around an NVIDIA compiler bug that turns the
+      // fall-through into a non-terminating loop.
+      main_switch_next_pc_phi_operands_.push_back(
+          builder_->makeIntConstant(int(cf_index)));
+      main_switch_next_pc_phi_operands_.push_back(
+          builder_->getBuildPoint()->getId());
+      builder_->createBranch(main_loop_continue_);
+    } else {
+      builder_->createBranch(new_case);
+    }
   }
   function.addBlock(new_case);
   builder_->setBuildPoint(new_case);

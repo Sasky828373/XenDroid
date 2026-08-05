@@ -172,6 +172,31 @@ bool D3D12TextureCache::Initialize() {
   }
   scaled_resolve_heap_count_ = 0;
 
+  // Query which host SRV formats the device can linearly filter, so samplers
+  // can fall back to point sampling for the ones it can't (mirrors the Vulkan
+  // backend's linear_filterable check).
+  auto is_linear_filterable = [device](DXGI_FORMAT format) {
+    if (format == DXGI_FORMAT_UNKNOWN) {
+      return false;
+    }
+    D3D12_FEATURE_DATA_FORMAT_SUPPORT format_support = {format};
+    if (FAILED(device->CheckFeatureSupport(D3D12_FEATURE_FORMAT_SUPPORT,
+                                           &format_support,
+                                           sizeof(format_support)))) {
+      return false;
+    }
+    return (format_support.Support1 & D3D12_FORMAT_SUPPORT1_SHADER_SAMPLE) != 0;
+  };
+  for (uint32_t i = 0; i < xe::countof(host_formats_); ++i) {
+    uint64_t format_bit = uint64_t(1) << i;
+    if (is_linear_filterable(host_formats_[i].dxgi_format_unsigned)) {
+      host_format_linear_filterable_unsigned_ |= format_bit;
+    }
+    if (is_linear_filterable(host_formats_[i].dxgi_format_signed)) {
+      host_format_linear_filterable_signed_ |= format_bit;
+    }
+  }
+
   // Create the loading root signature.
   D3D12_ROOT_PARAMETER root_parameters[3];
   // Parameter 0 is constants (changed multiple times when untiling).
@@ -669,7 +694,7 @@ void D3D12TextureCache::RequestTextures(uint32_t used_texture_mask) {
 // chrispy: optimize this further
 bool D3D12TextureCache::AreActiveTextureSRVKeysUpToDate(
     const TextureSRVKey* keys,
-    const D3D12Shader::TextureBinding* host_shader_bindings,
+    const DxbcShader::TextureBinding* host_shader_bindings,
     size_t host_shader_binding_count) const {
   for (size_t i = 0; i < host_shader_binding_count; ++i) {
     if (i + 8 < host_shader_binding_count) {
@@ -695,8 +720,7 @@ bool D3D12TextureCache::AreActiveTextureSRVKeysUpToDate(
 }
 
 void D3D12TextureCache::WriteActiveTextureSRVKeys(
-    TextureSRVKey* keys,
-    const D3D12Shader::TextureBinding* host_shader_bindings,
+    TextureSRVKey* keys, const DxbcShader::TextureBinding* host_shader_bindings,
     size_t host_shader_binding_count) const {
   for (size_t i = 0; i < host_shader_binding_count; ++i) {
     TextureSRVKey& key = keys[i];
@@ -715,7 +739,7 @@ void D3D12TextureCache::WriteActiveTextureSRVKeys(
 }
 
 void D3D12TextureCache::WriteActiveTextureBindfulSRV(
-    const D3D12Shader::TextureBinding& host_shader_binding,
+    const DxbcShader::TextureBinding& host_shader_binding,
     D3D12_CPU_DESCRIPTOR_HANDLE handle) {
   assert_false(bindless_resources_used_);
   uint32_t descriptor_index = UINT32_MAX;
@@ -801,7 +825,7 @@ void D3D12TextureCache::WriteActiveTextureBindfulSRV(
 }
 
 uint32_t D3D12TextureCache::GetActiveTextureBindlessSRVIndex(
-    const D3D12Shader::TextureBinding& host_shader_binding) {
+    const DxbcShader::TextureBinding& host_shader_binding) {
   assert_true(bindless_resources_used_);
   uint32_t descriptor_index = UINT32_MAX;
   uint32_t fetch_constant_index = host_shader_binding.fetch_constant;
@@ -870,12 +894,12 @@ uint32_t D3D12TextureCache::GetActiveTextureBindlessSRVIndex(
   return descriptor_index;
 }
 void D3D12TextureCache::PrefetchSamplerParameters(
-    const D3D12Shader::SamplerBinding& binding) const {
+    const DxbcShader::SamplerBinding& binding) const {
   swcache::PrefetchL1(&register_file()[XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0 +
                                        binding.fetch_constant * 6]);
 }
 D3D12TextureCache::SamplerParameters D3D12TextureCache::GetSamplerParameters(
-    const D3D12Shader::SamplerBinding& binding) const {
+    const DxbcShader::SamplerBinding& binding) const {
   const auto& regs = register_file();
   xenos::xe_gpu_texture_fetch_t fetch =
       regs.GetTextureFetch(binding.fetch_constant);
@@ -892,6 +916,7 @@ D3D12TextureCache::SamplerParameters D3D12TextureCache::GetSamplerParameters(
       xenos::ClampModeUsesBorder(parameters.clamp_y) ||
       xenos::ClampModeUsesBorder(parameters.clamp_z)) {
     parameters.border_color = fetch.border_color;
+    parameters.force_bc_w_to_max = fetch.force_bc_w_to_max;
   } else {
     parameters.border_color = xenos::BorderColor::k_ABGR_Black;
   }
@@ -921,7 +946,6 @@ D3D12TextureCache::SamplerParameters D3D12TextureCache::GetSamplerParameters(
       mip_filter == xenos::TextureFilter::kLinear;
   bool mip_base_map = mip_filter == xenos::TextureFilter::kBaseMap;
   // high cache miss count here, prefetch fetch earlier
-  //  TODO(Triang3l): Disable filtering for texture formats not supporting it.
   xenos::AnisoFilter aniso_filter =
       binding.aniso_filter == xenos::AnisoFilter::kUseFetchConst
           ? fetch.aniso_filter
@@ -945,6 +969,31 @@ D3D12TextureCache::SamplerParameters D3D12TextureCache::GetSamplerParameters(
     parameters.mip_linear = mip_filter == xenos::TextureFilter::kLinear;
   }
   parameters.mip_base_map = mip_base_map;
+
+  // Fall back to point sampling for host formats the device can't linearly
+  // filter (matches the Vulkan backend).
+  if (parameters.mag_linear || parameters.min_linear || parameters.mip_linear ||
+      parameters.aniso_filter != xenos::AnisoFilter::kDisabled) {
+    TextureKey texture_key;
+    uint8_t texture_swizzled_signs;
+    BindingInfoFromFetchConstant(fetch, texture_key, &texture_swizzled_signs);
+    bool linear_filterable = texture_key.is_valid;
+    if (linear_filterable) {
+      uint64_t format_bit = uint64_t(1) << uint32_t(texture_key.format);
+      if ((texture_util::IsAnySignNotSigned(texture_swizzled_signs) &&
+           !(host_format_linear_filterable_unsigned_ & format_bit)) ||
+          (texture_util::IsAnySignSigned(texture_swizzled_signs) &&
+           !(host_format_linear_filterable_signed_ & format_bit))) {
+        linear_filterable = false;
+      }
+    }
+    if (!linear_filterable) {
+      parameters.mag_linear = 0;
+      parameters.min_linear = 0;
+      parameters.mip_linear = 0;
+      parameters.aniso_filter = xenos::AnisoFilter::kDisabled;
+    }
+  }
 
   return parameters;
 }
@@ -1017,6 +1066,9 @@ void D3D12TextureCache::WriteSampler(SamplerParameters parameters,
       desc.BorderColor[2] = 0.0f;
       desc.BorderColor[3] = 0.0f;
       break;
+  }
+  if (parameters.force_bc_w_to_max) {
+    desc.BorderColor[3] = 1.0f;
   }
   desc.MinLOD = float(parameters.mip_min_level);
   if (parameters.mip_base_map) {

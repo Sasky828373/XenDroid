@@ -141,6 +141,9 @@ class CommandProcessor {
 
   Shader* active_vertex_shader() const { return active_vertex_shader_; }
   Shader* active_pixel_shader() const { return active_pixel_shader_; }
+  uint32_t active_vertex_shader_ucode_address() const {
+    return active_vertex_shader_ucode_address_;
+  }
 
   virtual bool Initialize();
   virtual void Shutdown();
@@ -606,6 +609,10 @@ class CommandProcessor {
 
   Shader* active_vertex_shader_ = nullptr;
   Shader* active_pixel_shader_ = nullptr;
+  // Guest physical address the active vertex shader's ucode was loaded from,
+  // for reading it back from shared memory (the ucode interpreter placeholder).
+  // 0 if unknown (loaded immediately, embedded in the command buffer).
+  uint32_t active_vertex_shader_ucode_address_ = 0;
 
   std::atomic<bool> paused_{false};
   std::unique_ptr<xe::threading::Event> pause_resume_event_;

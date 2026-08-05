@@ -22,6 +22,7 @@ object SettingsSchema {
             b("Vulkan", "vulkan_allow_present_mode_mailbox", "Allow present mode: mailbox", true),
             b("Vulkan", "vulkan_allow_present_mode_fifo_relaxed", "Allow present mode: FIFO relaxed", true),
             b("Vulkan", "vulkan_async_skip_draws", "Async skip draws", true),
+            b("Vulkan", "vulkan_placeholder_pipelines", "Placeholder pipelines", false),
             b("Vulkan", "vulkan_dynamic_pipeline_state", "Extended dynamic state", true),
             // Numeric thread count (0 = synchronous, 1..5 = explicit) -> a slider, not a
             // dropdown. Native cvar also accepts -1 (auto = 75% of cores), but the template

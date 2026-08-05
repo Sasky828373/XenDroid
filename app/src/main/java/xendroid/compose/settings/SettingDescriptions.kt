@@ -112,6 +112,7 @@ object SettingDescriptions {
         "vulkan_cache_texture_descriptors" to "Reuse texture/sampler descriptor sets across unchanged draws; disable to debug texture corruption",
         "vulkan_dynamic_pipeline_state" to "Use dynamic state for cull/depth/blend to cut pipeline permutations and shader-compile stutter",
         "vulkan_in_pass_resolve" to "Resolve EDRAM copies inside the render pass on tiled GPUs, avoiding a pass break per resolve",
+        "vulkan_placeholder_pipelines" to "Render a stand-in shader while the real one compiles, instead of skipping the draw until it is ready",
         "vulkan_resolve_to_texture" to "Have in-pass resolves write the destination texture directly; needs the promote toggle, pairs with skip upload",
         "vulkan_resolve_to_texture_promote" to "Allocate resolve-target textures so a resolve can write them directly; costs framebuffer compression on those textures",
         "vulkan_resolve_to_texture_serve" to "Skip re-uploading textures an in-pass resolve already filled this frame; this is where the round-trip traffic disappears",

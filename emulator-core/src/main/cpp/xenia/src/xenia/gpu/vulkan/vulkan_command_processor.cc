@@ -27,6 +27,7 @@
 #include "xenia/gpu/packet_disassembler.h"
 #include "xenia/gpu/registers.h"
 #include "xenia/gpu/shader.h"
+#include "xenia/gpu/spirv_fsi_system_constants.h"
 #include "xenia/gpu/spirv_shader_translator.h"
 #include "xenia/gpu/vulkan/vulkan_pipeline_cache.h"
 #include "xenia/gpu/vulkan/vulkan_render_target_cache.h"
@@ -129,6 +130,7 @@ DEFINE_bool(
 DECLARE_bool(gpu_debug_markers);
 DECLARE_bool(readback_memexport_fast);
 DECLARE_bool(submit_on_primary_buffer_end);
+DECLARE_bool(vulkan_placeholder_pipelines);
 
 DEFINE_bool(
     vulkan_dynamic_rendering, true,
@@ -3491,6 +3493,11 @@ VulkanCommandProcessor::GetPipelineLayout(size_t texture_count_pixel,
   pipeline_layout_key.sampler_count_pixel = uint16_t(sampler_count_pixel);
   pipeline_layout_key.texture_count_vertex = uint16_t(texture_count_vertex);
   pipeline_layout_key.sampler_count_vertex = uint16_t(sampler_count_vertex);
+  // Called from the draw thread and from pipeline creation threads (deferred
+  // translation), and reads/writes the shared layout maps +
+  // GetTextureDescriptor SetLayout (only called from here), so serialize the
+  // whole lookup+create.
+  std::lock_guard<std::mutex> layouts_lock(pipeline_layouts_mutex_);
   {
     auto it = pipeline_layouts_.find(pipeline_layout_key);
     if (it != pipeline_layouts_.end()) {
@@ -3837,6 +3844,8 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   SpirvShaderTranslator::Modification pixel_shader_modification;
   VulkanShader::VulkanTranslation* vertex_shader_translation;
   VulkanShader::VulkanTranslation* pixel_shader_translation;
+  bool use_interpreter = false;
+  bool drop_until_ready = false;
   uint32_t normalized_color_mask;
   reg::RB_DEPTHCONTROL normalized_depth_control;
   draw_util::HostDepthPolygonOffset host_depth_polygon_offset;
@@ -3915,10 +3924,54 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
                            pixel_shader->GetOrCreateTranslation(
                                pixel_shader_modification.value))
                      : nullptr;
-    if (!pipeline_cache_->EnsureShadersTranslated(vertex_shader_translation,
-                                                  pixel_shader_translation)) {
-      return false;
+    // Decide whether the ucode interpreter can stand in for the real VS while
+    // it translates+compiles in the background: a plain (non-tessellated,
+    // non-expanded) vertex shader with static control flow and no texture fetch
+    // or memory export, on a device matching the interpreter's assumptions
+    // (single shared-memory binding, full 32-bit indices). When eligible, VS
+    // translation is deferred to the background creation thread.
+    use_interpreter =
+        cvars::vulkan_placeholder_pipelines &&
+        cvars::async_shader_vs_interpreter &&
+        !vertex_shader_translation->is_translated() &&
+        active_vertex_shader_ucode_address_ != 0 &&
+        device_properties.fullDrawIndexUint32 &&
+        SpirvShaderTranslator::GetSharedMemoryStorageBufferCountLog2(
+            device_properties.maxStorageBufferRange) == 0 &&
+        primitive_processing_result.host_vertex_shader_type ==
+            Shader::HostVertexShaderType::kVertex &&
+        primitive_processing_result.host_primitive_type !=
+            xenos::PrimitiveType::kPointList &&
+        primitive_processing_result.host_primitive_type !=
+            xenos::PrimitiveType::kRectangleList &&
+        primitive_processing_result.host_primitive_type !=
+            xenos::PrimitiveType::kQuadList &&
+        vertex_shader->texture_bindings().empty() &&
+        !vertex_shader->uses_subroutine_calls() &&
+        vertex_shader->memexport_eM_written() == 0 &&
+        vertex_shader->constant_register_map().loop_bitmap == 0;
+    bool async_available =
+        pipeline_cache_->CanCreatePipelineAsync(pixel_shader != nullptr);
+    // A draw with no placeholder to render it now: the interpreter can't stand
+    // in AND the real VS isn't translated yet (so no real-VS + no-op-PS
+    // placeholder either). These are the draws async_shader_skip_draws governs.
+    // Interpreter-eligible draws and draws whose VS is already translated
+    // always have a placeholder and never translate on the draw thread.
+    bool no_placeholder = cvars::vulkan_placeholder_pipelines &&
+                          async_available && !use_interpreter &&
+                          !vertex_shader_translation->is_translated();
+    // The draw thread translates only for a no-placeholder draw that isn't
+    // being skipped (so it can render via a real-VS placeholder).
+    bool translate_here =
+        !async_available || (no_placeholder && !cvars::async_shader_skip_draws);
+    if (translate_here) {
+      if (!pipeline_cache_->EnsureShadersTranslated(vertex_shader_translation,
+                                                    pixel_shader_translation)) {
+        return false;
+      }
     }
+    drop_until_ready = cvars::vulkan_placeholder_pipelines && no_placeholder &&
+                       cvars::async_shader_skip_draws;
 
     // Obtain the samplers. Note that the bindings don't depend on the shader
     // modification, so if on the second iteration of this loop it becomes
@@ -3950,6 +4003,15 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
         // the whole vector - it must match this draw's (empty) binding list.
         shader_samplers.clear();
         cached_samplers_shader = nullptr;
+        continue;
+      }
+      // Don't read a shader's sampler bindings while a creation thread is still
+      // populating them (async draws don't translate here). A placeholder draw
+      // that ends up using this shader binds no samplers for it anyway.
+      if (!shader->bindings_ready()) {
+        if (!i) {
+          shader_samplers.clear();
+        }
         continue;
       }
       const std::vector<VulkanShader::SamplerBinding>& shader_sampler_bindings =
@@ -4092,28 +4154,54 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
           vertex_shader_translation, pixel_shader_translation,
           primitive_processing_result, normalized_depth_control,
           normalized_color_mask,
-          render_target_cache_->last_update_render_pass_key(), &pipeline)) {
+          render_target_cache_->last_update_render_pass_key(), use_interpreter,
+          &pipeline)) {
     XELOGE("IssueDraw: ConfigurePipeline failed for VS={:016X} PS={:016X}",
            vertex_shader->ucode_data_hash(),
            pixel_shader ? pixel_shader->ucode_data_hash() : 0);
     return false;
   }
 
-  VkPipeline current_pipeline =
-      pipeline->pipeline.load(std::memory_order_acquire);
-  if (current_pipeline == VK_NULL_HANDLE) {
-    // Pipeline is not ready yet - wait for it to be created.
-    pipeline_cache_->EndSubmission();
-    current_pipeline = pipeline->pipeline.load(std::memory_order_acquire);
-    if (current_pipeline == VK_NULL_HANDLE) {
-      // Still not ready - something is wrong.
-      return false;
-    }
+  if (drop_until_ready) {
+    // Non-interpretable draw whose shaders weren't translated yet - it has been
+    // queued for background creation; skip drawing it until the real pipeline
+    // is ready (a later frame renders it). Never translate/compile on the draw
+    // thread for these.
+    XELOGI(
+        "Draw skipped (no interpreter placeholder, real pipeline not ready): "
+        "VS {:016X}, PS {:016X}",
+        vertex_shader->ucode_data_hash(),
+        pixel_shader ? pixel_shader->ucode_data_hash() : 0);
+    return true;
   }
   // If async mode is active, this may be a placeholder pipeline. The real
   // pipeline will be swapped in by the creation thread when ready.
-  // We re-load the handle to pick up any swap that may have happened.
-  current_pipeline = pipeline->pipeline.load(std::memory_order_acquire);
+  VkPipeline current_pipeline =
+      pipeline->pipeline.load(std::memory_order_acquire);
+  if (cvars::vulkan_placeholder_pipelines &&
+      current_pipeline == VK_NULL_HANDLE) {
+    // Placeholder mode: real pipeline not created yet and no placeholder -
+    // skip this draw rather than stalling the draw thread.
+    XELOGI("Draw skipped (pipeline not ready yet): VS {:016X}, PS {:016X}",
+           vertex_shader->ucode_data_hash(),
+           pixel_shader ? pixel_shader->ucode_data_hash() : 0);
+    return true;
+  }
+  // Deferred-bind mode (cvar off): current_pipeline may legitimately be
+  // VK_NULL_HANDLE here - fall through and record a deferred bind of the
+  // stable slot pointer; EndSubmission waits (or replay drops it under
+  // vulkan_async_skip_draws). pipeline_layout is never null (the slot was
+  // created with at least the minimal layout).
+  // The interpreter reads the guest ucode from shared memory by its program
+  // address. A cached interpreter placeholder reused for an inline
+  // (IM_LOAD_IMMEDIATE, address 0) shader can't be fed, so skip until the real
+  // pipeline is ready rather than interpret from address 0.
+  if (active_vertex_shader_ucode_address_ == 0 &&
+      current_pipeline ==
+          pipeline->placeholder_pipeline.load(std::memory_order_acquire) &&
+      pipeline->uses_interpreter.load(std::memory_order_acquire)) {
+    return true;
+  }
 
   // Push debug marker with Xbox 360 draw context for RenderDoc annotation.
   // Done early so texture loads appear nested under the draw that uses them.
@@ -4129,15 +4217,17 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   // Update the textures before most other work in the submission because
   // samplers depend on this (and in case of sampler overflow in a submission,
   // submissions must be split) - may perform dispatches and copying.
+  // Only read after-translation state for shaders whose bindings are ready (not
+  // being populated by a creation thread for an async draw).
   uint32_t used_texture_mask =
-      vertex_shader->GetUsedTextureMaskAfterTranslation() |
-      (pixel_shader != nullptr
+      (vertex_shader->bindings_ready()
+           ? vertex_shader->GetUsedTextureMaskAfterTranslation()
+           : 0) |
+      (pixel_shader != nullptr && pixel_shader->bindings_ready()
            ? pixel_shader->GetUsedTextureMaskAfterTranslation()
            : 0);
   texture_cache_->RequestTextures(used_texture_mask);
 
-  auto pipeline_layout =
-      static_cast<const PipelineLayout*>(pipeline->pipeline_layout);
   // Update the graphics pipeline, and if the new graphics pipeline has a
   // different layout, invalidate incompatible descriptor sets before updating
   // current_guest_graphics_pipeline_layout_.
@@ -4157,6 +4247,8 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     current_guest_graphics_pipeline_ = &pipeline->pipeline;
     current_external_graphics_pipeline_ = VK_NULL_HANDLE;
   }
+  auto pipeline_layout = static_cast<const PipelineLayout*>(
+      pipeline->pipeline_layout.load(std::memory_order_acquire));
   if (current_guest_graphics_pipeline_layout_ != pipeline_layout) {
     if (current_guest_graphics_pipeline_layout_) {
       // Keep descriptor set layouts for which the new pipeline layout is
@@ -4290,9 +4382,46 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
       normalized_color_mask,
       apply_host_depth_polygon_offset ? &host_depth_polygon_offset : nullptr);
 
+  // Whether we bound the placeholder pipeline (vs the real one). Derived from
+  // the handle actually bound, so it's consistent with current_pipeline even if
+  // the creation thread swaps in the real pipeline mid-draw (the is_placeholder
+  // flag is cleared a few instructions later, so reading it separately can
+  // disagree).
+  bool bound_is_placeholder =
+      current_pipeline ==
+      pipeline->placeholder_pipeline.load(std::memory_order_acquire);
+  // The interpreter placeholder (interpreter VS + no-op PS) also needs its
+  // ucode location + full float constants fed to it.
+  bool interpreter_placeholder =
+      bound_is_placeholder &&
+      pipeline->uses_interpreter.load(std::memory_order_acquire);
+  // Any placeholder draw binds the no-op placeholder pixel shader (which never
+  // samples), so its pixel textures/samplers must not be bound - the
+  // placeholder pipeline's layout has none.
+  bool placeholder_pixel_shader = bound_is_placeholder;
+  {
+    uint32_t ucode_base_dwords = 0, cf_instr_count = 0;
+    if (interpreter_placeholder) {
+      uint32_t ucode_address = active_vertex_shader_ucode_address_;
+      ucode_base_dwords = ucode_address >> 2;
+      cf_instr_count = vertex_shader->cf_pair_index_bound() * 2;
+      shared_memory_->RequestRange(
+          ucode_address,
+          uint32_t(vertex_shader->ucode_dword_count()) * sizeof(uint32_t));
+    }
+    if (system_constants_.interpreter_ucode_base_dwords != ucode_base_dwords ||
+        system_constants_.interpreter_cf_instr_count != cf_instr_count) {
+      system_constants_.interpreter_ucode_base_dwords = ucode_base_dwords;
+      system_constants_.interpreter_cf_instr_count = cf_instr_count;
+      current_constant_buffers_up_to_date_ &=
+          ~(UINT32_C(1) << SpirvShaderTranslator::kConstantBufferSystem);
+    }
+  }
+
   // Update uniform buffers and descriptor sets after binding the pipeline with
   // the new layout.
-  if (!UpdateBindings(vertex_shader, pixel_shader)) {
+  if (!UpdateBindings(vertex_shader, pixel_shader, interpreter_placeholder,
+                      placeholder_pixel_shader)) {
     return false;
   }
 
@@ -7838,13 +7967,9 @@ void VulkanCommandProcessor::UpdateSystemConstantValues(
 
   const RegisterFile& regs = *register_file_;
   auto pa_cl_vte_cntl = regs.Get<reg::PA_CL_VTE_CNTL>();
-  auto pa_su_sc_mode_cntl = regs.Get<reg::PA_SU_SC_MODE_CNTL>();
   auto rb_alpha_ref = regs.Get<float>(XE_GPU_REG_RB_ALPHA_REF);
   auto rb_colorcontrol = regs.Get<reg::RB_COLORCONTROL>();
   auto rb_depth_info = regs.Get<reg::RB_DEPTH_INFO>();
-  auto rb_stencilrefmask = regs.Get<reg::RB_STENCILREFMASK>();
-  auto rb_stencilrefmask_bf =
-      regs.Get<reg::RB_STENCILREFMASK>(XE_GPU_REG_RB_STENCILREFMASK_BF);
   auto rb_surface_info = regs.Get<reg::RB_SURFACE_INFO>();
   auto vgt_draw_initiator = regs.Get<reg::VGT_DRAW_INITIATOR>();
   auto vgt_indx_offset = regs.Get<int32_t>(XE_GPU_REG_VGT_INDX_OFFSET);
@@ -7861,36 +7986,12 @@ void VulkanCommandProcessor::UpdateSystemConstantValues(
   // targets with the same base address are used in the lighting pass of
   // 4D5307E6, for example, with the needed one picked with dynamic control
   // flow.
+  // The color info registers are also read by the non-FSI gamma flag and color
+  // exponent bias below.
   reg::RB_COLOR_INFO color_infos[xenos::kMaxColorRenderTargets];
-  float rt_clamp[4][4];
-  // Two UINT32_MAX if no components actually existing in the RT are written.
-  uint32_t rt_keep_masks[4][2];
   for (uint32_t i = 0; i < xenos::kMaxColorRenderTargets; ++i) {
-    auto color_info = regs.Get<reg::RB_COLOR_INFO>(
+    color_infos[i] = regs.Get<reg::RB_COLOR_INFO>(
         reg::RB_COLOR_INFO::rt_register_indices[i]);
-    color_infos[i] = color_info;
-    if (edram_fragment_shader_interlock) {
-      RenderTargetCache::GetPSIColorFormatInfo(
-          color_info.color_format, (normalized_color_mask >> (i * 4)) & 0b1111,
-          rt_clamp[i][0], rt_clamp[i][1], rt_clamp[i][2], rt_clamp[i][3],
-          rt_keep_masks[i][0], rt_keep_masks[i][1]);
-    }
-  }
-
-  // Disable depth and stencil if it aliases a color render target (for
-  // instance, during the XBLA logo in 58410954, though depth writing is already
-  // disabled there).
-  bool depth_stencil_enabled = normalized_depth_control.stencil_enable ||
-                               normalized_depth_control.z_enable;
-  if (edram_fragment_shader_interlock && depth_stencil_enabled) {
-    for (uint32_t i = 0; i < 4; ++i) {
-      if (rb_depth_info.depth_base == color_infos[i].color_base &&
-          (rt_keep_masks[i][0] != UINT32_MAX ||
-           rt_keep_masks[i][1] != UINT32_MAX)) {
-        depth_stencil_enabled = false;
-        break;
-      }
-    }
   }
 
   bool dirty = false;
@@ -7959,29 +8060,22 @@ void VulkanCommandProcessor::UpdateSystemConstantValues(
       }
     }
   }
-  if (edram_fragment_shader_interlock && depth_stencil_enabled) {
-    flags |= SpirvShaderTranslator::kSysFlag_FSIDepthStencil;
-    if (normalized_depth_control.z_enable) {
-      flags |= uint32_t(normalized_depth_control.zfunc)
-               << SpirvShaderTranslator::kSysFlag_FSIDepthPassIfLess_Shift;
-      if (normalized_depth_control.z_write_enable) {
-        flags |= SpirvShaderTranslator::kSysFlag_FSIDepthWrite;
-      }
-    } else {
-      // In case stencil is used without depth testing - always pass, and
-      // don't modify the stored depth.
-      flags |= SpirvShaderTranslator::kSysFlag_FSIDepthPassIfLess |
-               SpirvShaderTranslator::kSysFlag_FSIDepthPassIfEqual |
-               SpirvShaderTranslator::kSysFlag_FSIDepthPassIfGreater;
+  if (edram_fragment_shader_interlock) {
+    // Fragment shader interlock (EDRAM ROP) flag bits and EDRAM constants. The
+    // ZPD occlusion counter slot is selected here from Vulkan-specific query
+    // state and passed into the shared helper.
+    uint32_t zpd_fsi_counter_index = UINT32_MAX;
+    if (zpd_active_query_index_ != UINT32_MAX && zpd_active_query_is_fsi_ &&
+        zpd_host_query_pool_->fsi_counter_initialized()) {
+      zpd_fsi_counter_index = zpd_active_query_index_;
     }
-    if (normalized_depth_control.stencil_enable) {
-      flags |= SpirvShaderTranslator::kSysFlag_FSIStencilTest;
-    }
-    // Hint - if not applicable to the shader, will not have effect.
-    if (alpha_test_function == xenos::CompareFunction::kAlways &&
-        !rb_colorcontrol.alpha_to_mask_enable) {
-      flags |= SpirvShaderTranslator::kSysFlag_FSIDepthStencilEarlyWrite;
-    }
+    dirty |= zpd_fsi_counter_index_force_update_;
+    zpd_fsi_counter_index_force_update_ = false;
+    WriteFragmentShaderInterlockSystemConstants(
+        system_constants_, flags, dirty, regs, primitive_polygonal,
+        normalized_depth_control, normalized_color_mask,
+        draw_resolution_scale_x, draw_resolution_scale_y,
+        zpd_fsi_counter_index);
   }
   dirty |= system_constants_.flags != flags;
   system_constants_.flags = flags;
@@ -8074,8 +8168,8 @@ void VulkanCommandProcessor::UpdateSystemConstantValues(
     dirty |= system_constants_.tessellation_factor_range[1] != tess_max;
     system_constants_.tessellation_factor_range[0] = tess_min;
     system_constants_.tessellation_factor_range[1] = tess_max;
-    uint32_t tess_vie =
-        static_cast<uint32_t>(regs.Get<reg::VGT_DMA_SIZE>().swap_mode);
+    uint32_t tess_vie = static_cast<uint32_t>(
+        primitive_processing_result.host_shader_index_endian);
     uint32_t tess_vio = regs[XE_GPU_REG_VGT_INDX_OFFSET];
     uint32_t tess_vmin = regs[XE_GPU_REG_VGT_MIN_VTX_INDX];
     uint32_t tess_vmax = regs[XE_GPU_REG_VGT_MAX_VTX_INDX];
@@ -8206,37 +8300,7 @@ void VulkanCommandProcessor::UpdateSystemConstantValues(
   dirty |= system_constants_.alpha_to_mask != alpha_to_mask;
   system_constants_.alpha_to_mask = alpha_to_mask;
 
-  // FSI ZPD counter.
-  uint32_t zpd_fsi_counter_index = UINT32_MAX;
-  if (edram_fragment_shader_interlock &&
-      zpd_active_query_index_ != UINT32_MAX && zpd_active_query_is_fsi_ &&
-      zpd_host_query_pool_->fsi_counter_initialized()) {
-    zpd_fsi_counter_index = zpd_active_query_index_;
-  }
-  dirty |= zpd_fsi_counter_index_force_update_ ||
-           system_constants_.zpd_fsi_counter_index != zpd_fsi_counter_index;
-  system_constants_.zpd_fsi_counter_index = zpd_fsi_counter_index;
-  zpd_fsi_counter_index_force_update_ = false;
-
-  uint32_t edram_tile_dwords_scaled =
-      xenos::kEdramTileWidthSamples * xenos::kEdramTileHeightSamples *
-      (draw_resolution_scale_x * draw_resolution_scale_y);
-
-  // EDRAM pitch for FSI render target writing.
-  if (edram_fragment_shader_interlock) {
-    // Align, then multiply by 32bpp tile size in dwords.
-    uint32_t edram_32bpp_tile_pitch_dwords_scaled =
-        ((rb_surface_info.surface_pitch *
-          (rb_surface_info.msaa_samples >= xenos::MsaaSamples::k4X ? 2 : 1)) +
-         (xenos::kEdramTileWidthSamples - 1)) /
-        xenos::kEdramTileWidthSamples * edram_tile_dwords_scaled;
-    dirty |= system_constants_.edram_32bpp_tile_pitch_dwords_scaled !=
-             edram_32bpp_tile_pitch_dwords_scaled;
-    system_constants_.edram_32bpp_tile_pitch_dwords_scaled =
-        edram_32bpp_tile_pitch_dwords_scaled;
-  }
-
-  // Color exponent bias and FSI render target writing.
+  // Color exponent bias.
   for (uint32_t i = 0; i < xenos::kMaxColorRenderTargets; ++i) {
     reg::RB_COLOR_INFO color_info = color_infos[i];
     // Exponent bias is in bits 20:25 of RB_COLOR_INFO.
@@ -8257,38 +8321,6 @@ void VulkanCommandProcessor::UpdateSystemConstantValues(
         UINT32_C(0x3F800000) + (color_exp_bias << 23);
     dirty |= system_constants_.color_exp_bias[i] != color_exp_bias_scale;
     system_constants_.color_exp_bias[i] = color_exp_bias_scale;
-    if (edram_fragment_shader_interlock) {
-      dirty |=
-          system_constants_.edram_rt_keep_mask[i][0] != rt_keep_masks[i][0];
-      system_constants_.edram_rt_keep_mask[i][0] = rt_keep_masks[i][0];
-      dirty |=
-          system_constants_.edram_rt_keep_mask[i][1] != rt_keep_masks[i][1];
-      system_constants_.edram_rt_keep_mask[i][1] = rt_keep_masks[i][1];
-      if (rt_keep_masks[i][0] != UINT32_MAX ||
-          rt_keep_masks[i][1] != UINT32_MAX) {
-        uint32_t rt_base_dwords_scaled =
-            color_info.color_base * edram_tile_dwords_scaled;
-        dirty |= system_constants_.edram_rt_base_dwords_scaled[i] !=
-                 rt_base_dwords_scaled;
-        system_constants_.edram_rt_base_dwords_scaled[i] =
-            rt_base_dwords_scaled;
-        uint32_t format_flags =
-            RenderTargetCache::AddPSIColorFormatFlags(color_info.color_format);
-        dirty |= system_constants_.edram_rt_format_flags[i] != format_flags;
-        system_constants_.edram_rt_format_flags[i] = format_flags;
-        uint32_t blend_factors_ops =
-            regs[reg::RB_BLENDCONTROL::rt_register_indices[i]] & 0x1FFF1FFF;
-        dirty |= system_constants_.edram_rt_blend_factors_ops[i] !=
-                 blend_factors_ops;
-        system_constants_.edram_rt_blend_factors_ops[i] = blend_factors_ops;
-        // Can't do float comparisons here because NaNs would result in always
-        // setting the dirty flag.
-        dirty |= std::memcmp(system_constants_.edram_rt_clamp[i], rt_clamp[i],
-                             4 * sizeof(float)) != 0;
-        std::memcpy(system_constants_.edram_rt_clamp[i], rt_clamp[i],
-                    4 * sizeof(float));
-      }
-    }
   }
 
   if (!edram_fragment_shader_interlock && host_depth_polygon_offset) {
@@ -8315,116 +8347,6 @@ void VulkanCommandProcessor::UpdateSystemConstantValues(
         polygon_offset.back_offset;
   }
 
-  if (edram_fragment_shader_interlock) {
-    uint32_t depth_base_dwords_scaled =
-        rb_depth_info.depth_base * edram_tile_dwords_scaled;
-    dirty |= system_constants_.edram_depth_base_dwords_scaled !=
-             depth_base_dwords_scaled;
-    system_constants_.edram_depth_base_dwords_scaled = depth_base_dwords_scaled;
-
-    // For non-polygons, front polygon offset is used, and it's enabled if
-    // POLY_OFFSET_PARA_ENABLED is set, for polygons, separate front and back
-    // are used.
-    float poly_offset_front_scale = 0.0f, poly_offset_front_offset = 0.0f;
-    float poly_offset_back_scale = 0.0f, poly_offset_back_offset = 0.0f;
-    if (primitive_polygonal) {
-      if (pa_su_sc_mode_cntl.poly_offset_front_enable) {
-        poly_offset_front_scale =
-            regs.Get<float>(XE_GPU_REG_PA_SU_POLY_OFFSET_FRONT_SCALE);
-        poly_offset_front_offset =
-            regs.Get<float>(XE_GPU_REG_PA_SU_POLY_OFFSET_FRONT_OFFSET);
-      }
-      if (pa_su_sc_mode_cntl.poly_offset_back_enable) {
-        poly_offset_back_scale =
-            regs.Get<float>(XE_GPU_REG_PA_SU_POLY_OFFSET_BACK_SCALE);
-        poly_offset_back_offset =
-            regs.Get<float>(XE_GPU_REG_PA_SU_POLY_OFFSET_BACK_OFFSET);
-      }
-    } else {
-      if (pa_su_sc_mode_cntl.poly_offset_para_enable) {
-        poly_offset_front_scale =
-            regs.Get<float>(XE_GPU_REG_PA_SU_POLY_OFFSET_FRONT_SCALE);
-        poly_offset_front_offset =
-            regs.Get<float>(XE_GPU_REG_PA_SU_POLY_OFFSET_FRONT_OFFSET);
-        poly_offset_back_scale = poly_offset_front_scale;
-        poly_offset_back_offset = poly_offset_front_offset;
-      }
-    }
-    // With non-square resolution scaling, make sure the worst-case impact is
-    // reverted (slope only along the scaled axis), thus max. More bias is
-    // better than less bias, because less bias means Z fighting with the
-    // background is more likely.
-    float poly_offset_scale_factor =
-        xenos::kPolygonOffsetScaleSubpixelUnit *
-        std::max(draw_resolution_scale_x, draw_resolution_scale_y);
-    poly_offset_front_scale *= poly_offset_scale_factor;
-    poly_offset_back_scale *= poly_offset_scale_factor;
-    dirty |= system_constants_.edram_poly_offset_front_scale !=
-             poly_offset_front_scale;
-    system_constants_.edram_poly_offset_front_scale = poly_offset_front_scale;
-    dirty |= system_constants_.edram_poly_offset_front_offset !=
-             poly_offset_front_offset;
-    system_constants_.edram_poly_offset_front_offset = poly_offset_front_offset;
-    dirty |= system_constants_.edram_poly_offset_back_scale !=
-             poly_offset_back_scale;
-    system_constants_.edram_poly_offset_back_scale = poly_offset_back_scale;
-    dirty |= system_constants_.edram_poly_offset_back_offset !=
-             poly_offset_back_offset;
-    system_constants_.edram_poly_offset_back_offset = poly_offset_back_offset;
-
-    if (depth_stencil_enabled && normalized_depth_control.stencil_enable) {
-      uint32_t stencil_front_reference_masks =
-          rb_stencilrefmask.value & 0xFFFFFF;
-      dirty |= system_constants_.edram_stencil_front_reference_masks !=
-               stencil_front_reference_masks;
-      system_constants_.edram_stencil_front_reference_masks =
-          stencil_front_reference_masks;
-      uint32_t stencil_func_ops =
-          (normalized_depth_control.value >> 8) & ((1 << 12) - 1);
-      dirty |=
-          system_constants_.edram_stencil_front_func_ops != stencil_func_ops;
-      system_constants_.edram_stencil_front_func_ops = stencil_func_ops;
-
-      if (primitive_polygonal && normalized_depth_control.backface_enable) {
-        uint32_t stencil_back_reference_masks =
-            rb_stencilrefmask_bf.value & 0xFFFFFF;
-        dirty |= system_constants_.edram_stencil_back_reference_masks !=
-                 stencil_back_reference_masks;
-        system_constants_.edram_stencil_back_reference_masks =
-            stencil_back_reference_masks;
-        uint32_t stencil_func_ops_bf =
-            (normalized_depth_control.value >> 20) & ((1 << 12) - 1);
-        dirty |= system_constants_.edram_stencil_back_func_ops !=
-                 stencil_func_ops_bf;
-        system_constants_.edram_stencil_back_func_ops = stencil_func_ops_bf;
-      } else {
-        dirty |= std::memcmp(system_constants_.edram_stencil_back,
-                             system_constants_.edram_stencil_front,
-                             2 * sizeof(uint32_t)) != 0;
-        std::memcpy(system_constants_.edram_stencil_back,
-                    system_constants_.edram_stencil_front,
-                    2 * sizeof(uint32_t));
-      }
-    }
-
-    dirty |= system_constants_.edram_blend_constant[0] !=
-             regs.Get<float>(XE_GPU_REG_RB_BLEND_RED);
-    system_constants_.edram_blend_constant[0] =
-        regs.Get<float>(XE_GPU_REG_RB_BLEND_RED);
-    dirty |= system_constants_.edram_blend_constant[1] !=
-             regs.Get<float>(XE_GPU_REG_RB_BLEND_GREEN);
-    system_constants_.edram_blend_constant[1] =
-        regs.Get<float>(XE_GPU_REG_RB_BLEND_GREEN);
-    dirty |= system_constants_.edram_blend_constant[2] !=
-             regs.Get<float>(XE_GPU_REG_RB_BLEND_BLUE);
-    system_constants_.edram_blend_constant[2] =
-        regs.Get<float>(XE_GPU_REG_RB_BLEND_BLUE);
-    dirty |= system_constants_.edram_blend_constant[3] !=
-             regs.Get<float>(XE_GPU_REG_RB_BLEND_ALPHA);
-    system_constants_.edram_blend_constant[3] =
-        regs.Get<float>(XE_GPU_REG_RB_BLEND_ALPHA);
-  }
-
   if (dirty) {
     current_constant_buffers_up_to_date_ &=
         ~(UINT32_C(1) << SpirvShaderTranslator::kConstantBufferSystem);
@@ -8432,7 +8354,9 @@ void VulkanCommandProcessor::UpdateSystemConstantValues(
 }
 
 bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
-                                            const VulkanShader* pixel_shader) {
+                                            const VulkanShader* pixel_shader,
+                                            bool interpreter_placeholder,
+                                            bool placeholder_pixel_shader) {
 #if XE_GPU_FINE_GRAINED_DRAW_SCOPES
   SCOPE_profile_cpu_f("gpu");
 #endif  // XE_GPU_FINE_GRAINED_DRAW_SCOPES
@@ -8469,6 +8393,13 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
             ~(UINT32_C(1) << SpirvShaderTranslator::kConstantBufferFloatVertex);
       }
     }
+  }
+  // The interpreter needs all 256 float constants unpacked; switching between
+  // that and a shader's packed subset must re-upload.
+  if (interpreter_placeholder != float_constants_vertex_are_full_) {
+    current_constant_buffers_up_to_date_ &=
+        ~(UINT32_C(1) << SpirvShaderTranslator::kConstantBufferFloatVertex);
+    float_constants_vertex_are_full_ = interpreter_placeholder;
   }
   uint32_t float_constant_count_pixel = 0;
   if (pixel_shader != nullptr) {
@@ -8528,9 +8459,13 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
       // for both the vertex shader and the pixel shader), so if the first draw
       // in the frame doesn't have float constants at all, still allocate a
       // dummy buffer.
+      // The interpreter indexes all 256 float constants by raw index, so upload
+      // the full contiguous register file rather than the packed subset.
       size_t float_constants_size =
-          sizeof(float) * 4 *
-          std::max(float_constant_count_vertex, UINT32_C(1));
+          interpreter_placeholder
+              ? sizeof(float) * 4 * 256
+              : sizeof(float) * 4 *
+                    std::max(float_constant_count_vertex, UINT32_C(1));
       uint8_t* mapping = uniform_buffer_pool_->Request(
           frame_current_, float_constants_size, uniform_buffer_alignment,
           buffer_info.buffer, buffer_info.offset);
@@ -8538,18 +8473,23 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
         return false;
       }
       buffer_info.range = VkDeviceSize(float_constants_size);
-      for (uint32_t i = 0; i < 4; ++i) {
-        uint64_t float_constant_map_entry =
-            current_float_constant_map_vertex_[i];
-        uint32_t float_constant_index;
-        while (xe::bit_scan_forward(float_constant_map_entry,
-                                    &float_constant_index)) {
-          float_constant_map_entry &= ~(1ull << float_constant_index);
-          std::memcpy(mapping,
-                      &regs[XE_GPU_REG_SHADER_CONSTANT_000_X + (i << 8) +
-                            (float_constant_index << 2)],
-                      sizeof(float) * 4);
-          mapping += sizeof(float) * 4;
+      if (interpreter_placeholder) {
+        std::memcpy(mapping, &regs[XE_GPU_REG_SHADER_CONSTANT_000_X],
+                    sizeof(float) * 4 * 256);
+      } else {
+        for (uint32_t i = 0; i < 4; ++i) {
+          uint64_t float_constant_map_entry =
+              current_float_constant_map_vertex_[i];
+          uint32_t float_constant_index;
+          while (xe::bit_scan_forward(float_constant_map_entry,
+                                      &float_constant_index)) {
+            float_constant_map_entry &= ~(1ull << float_constant_index);
+            std::memcpy(mapping,
+                        &regs[XE_GPU_REG_SHADER_CONSTANT_000_X + (i << 8) +
+                              (float_constant_index << 2)],
+                        sizeof(float) * 4);
+            mapping += sizeof(float) * 4;
+          }
         }
       }
       current_constant_buffers_up_to_date_ |=
@@ -8624,17 +8564,23 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
     }
   }
 
-  // Textures and samplers.
+  // Textures and samplers. Only read a shader's binding lists when its bindings
+  // are ready - an async draw doesn't translate here, so a creation thread may
+  // still be populating them (reading size()/contents would race). Binding the
+  // reference is fine; only size()/iteration touch the racing buffer.
+  bool vertex_bindings_ready = vertex_shader->bindings_ready();
   const std::vector<VulkanShader::SamplerBinding>& samplers_vertex =
       vertex_shader->GetSamplerBindingsAfterTranslation();
   const std::vector<VulkanShader::TextureBinding>& textures_vertex =
       vertex_shader->GetTextureBindingsAfterTranslation();
-  uint32_t sampler_count_vertex = uint32_t(samplers_vertex.size());
-  uint32_t texture_count_vertex = uint32_t(textures_vertex.size());
+  uint32_t sampler_count_vertex =
+      vertex_bindings_ready ? uint32_t(samplers_vertex.size()) : 0;
+  uint32_t texture_count_vertex =
+      vertex_bindings_ready ? uint32_t(textures_vertex.size()) : 0;
   const std::vector<VulkanShader::SamplerBinding>* samplers_pixel;
   const std::vector<VulkanShader::TextureBinding>* textures_pixel;
   uint32_t sampler_count_pixel, texture_count_pixel;
-  if (pixel_shader) {
+  if (pixel_shader && pixel_shader->bindings_ready()) {
     samplers_pixel = &pixel_shader->GetSamplerBindingsAfterTranslation();
     textures_pixel = &pixel_shader->GetTextureBindingsAfterTranslation();
     sampler_count_pixel = uint32_t(samplers_pixel->size());
@@ -8645,6 +8591,20 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
     sampler_count_pixel = 0;
     texture_count_pixel = 0;
   }
+  // Placeholder pipelines were built with a layout matching only what their
+  // placeholder shaders access, so don't bind texture sets they lack (which
+  // could otherwise happen if the real shaders finished translating mid-draw).
+  // The no-op placeholder PS never samples; the interpreter VS never samples.
+  // (Both flags stay false when vulkan_placeholder_pipelines is off.)
+  if (placeholder_pixel_shader) {
+    sampler_count_pixel = 0;
+    texture_count_pixel = 0;
+  }
+  if (interpreter_placeholder) {
+    sampler_count_vertex = 0;
+    texture_count_vertex = 0;
+  }
+
   // Value-cache the texture/sampler descriptor sets: only force a re-write (by
   // clearing the stage's values-up-to-date bit) when the resolved VkImageView /
   // VkSampler handles, the binding counts, or the layout changed since the last
@@ -8718,13 +8678,18 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
       // shader (and thus its binding list), a used texture's resolved host
       // image view (signalled by the texture cache's per-fetch-constant
       // bindings-changed mask), or any sampler in the stage's vector. The
-      // content-hash (FNV) is intentionally NOT computed here so edge mode's
-      // gate cost equals edge's gate only.
+      // content-hash is intentionally NOT computed here so edge mode's gate
+      // cost equals edge's gate only. Used-texture masks are guarded by
+      // bindings_ready() - an async draw may not have translated the stage yet.
       uint32_t textures_changed = texture_cache_->texture_bindings_changed();
       uint32_t used_texture_mask_vertex =
-          vertex_shader->GetUsedTextureMaskAfterTranslation();
+          vertex_bindings_ready
+              ? vertex_shader->GetUsedTextureMaskAfterTranslation()
+              : 0;
       uint32_t used_texture_mask_pixel =
-          pixel_shader ? pixel_shader->GetUsedTextureMaskAfterTranslation() : 0;
+          (pixel_shader && pixel_shader->bindings_ready())
+              ? pixel_shader->GetUsedTextureMaskAfterTranslation()
+              : 0;
       if ((current_graphics_descriptor_set_values_up_to_date_ &
            (UINT32_C(1)
             << SpirvShaderTranslator::kDescriptorSetTexturesVertex)) &&
@@ -8746,32 +8711,33 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
       texture_cache_->ResetTextureBindingsChanged(used_texture_mask_vertex |
                                                   used_texture_mask_pixel);
     } else {
-    // XenDroid's content-hash gate (default).
-    // Vertex stage.
-    if (texture_count_vertex || sampler_count_vertex) {
-      texture_set_hash_vertex = compute_texture_set_hash(
-          texture_count_vertex, sampler_count_vertex, true, &textures_vertex,
-          texture_cache_.get(), current_samplers_vertex_.data());
-      if (!current_texture_descriptor_set_hash_valid_vertex_ ||
-          texture_set_hash_vertex !=
-              current_texture_descriptor_set_hash_vertex_) {
-        current_graphics_descriptor_set_values_up_to_date_ &= ~(
-            UINT32_C(1) << SpirvShaderTranslator::kDescriptorSetTexturesVertex);
+      // XenDroid's content-hash gate (default).
+      // Vertex stage.
+      if (texture_count_vertex || sampler_count_vertex) {
+        texture_set_hash_vertex = compute_texture_set_hash(
+            texture_count_vertex, sampler_count_vertex, true, &textures_vertex,
+            texture_cache_.get(), current_samplers_vertex_.data());
+        if (!current_texture_descriptor_set_hash_valid_vertex_ ||
+            texture_set_hash_vertex !=
+                current_texture_descriptor_set_hash_vertex_) {
+          current_graphics_descriptor_set_values_up_to_date_ &= ~(
+              UINT32_C(1)
+              << SpirvShaderTranslator::kDescriptorSetTexturesVertex);
+        }
       }
-    }
-    // Pixel stage.
-    if (texture_count_pixel || sampler_count_pixel) {
-      texture_set_hash_pixel = compute_texture_set_hash(
-          texture_count_pixel, sampler_count_pixel, false, textures_pixel,
-          texture_cache_.get(),
-          samplers_pixel ? current_samplers_pixel_.data() : nullptr);
-      if (!current_texture_descriptor_set_hash_valid_pixel_ ||
-          texture_set_hash_pixel !=
-              current_texture_descriptor_set_hash_pixel_) {
-        current_graphics_descriptor_set_values_up_to_date_ &= ~(
-            UINT32_C(1) << SpirvShaderTranslator::kDescriptorSetTexturesPixel);
+      // Pixel stage.
+      if (texture_count_pixel || sampler_count_pixel) {
+        texture_set_hash_pixel = compute_texture_set_hash(
+            texture_count_pixel, sampler_count_pixel, false, textures_pixel,
+            texture_cache_.get(),
+            samplers_pixel ? current_samplers_pixel_.data() : nullptr);
+        if (!current_texture_descriptor_set_hash_valid_pixel_ ||
+            texture_set_hash_pixel !=
+                current_texture_descriptor_set_hash_pixel_) {
+          current_graphics_descriptor_set_values_up_to_date_ &= ~(
+              UINT32_C(1) << SpirvShaderTranslator::kDescriptorSetTexturesPixel);
+        }
       }
-    }
     }
   } else {
     // Opt-out: reproduce the original unconditional clear (re-write + re-bind

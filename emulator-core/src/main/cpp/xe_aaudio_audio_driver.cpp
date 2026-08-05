@@ -214,10 +214,12 @@ aaudio_data_callback_result_t AAudioAudioDriver::AudioCallback(
         // Conceal only the part still owed.
         driver->stat_gaps_.fetch_add(1, std::memory_order_relaxed);
         gapped = true;
+        // ConcealGap repeats last_block_, so it can source at most one block.
         const int32_t done_samples = frames_done * host_frame_channels_;
-        driver->ConcealGap(output_buffer + done_samples,
-                           out_samples - done_samples,
-                           out_samples - done_samples);
+        const int32_t owed_samples = out_samples - done_samples;
+        driver->ConcealGap(
+            output_buffer + done_samples, owed_samples,
+            std::min(owed_samples, static_cast<int32_t>(host_block_samples_)));
         break;
       }
       conversion::sequential_6_BE_to_interleaved_2_LE(

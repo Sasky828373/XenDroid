@@ -18,6 +18,9 @@
 #include <sys/resource.h>
 #endif
 
+#include <atomic>
+#include <cstring>
+#include <cerrno>
 #include "xenia/base/logging.h"
 #include "xenia/base/math.h"
 #include "xenia/base/profiling.h"
@@ -102,6 +105,30 @@ X_STATUS AudioSystem::Setup(kernel::KernelState* kernel_state) {
   return X_STATUS_SUCCESS;
 }
 
+#if XE_PLATFORM_xendroid
+// Reports the first failure rather than dropping it: an app that is not
+// allowed to renice would otherwise look like it had succeeded.
+void ApplyAudioThreadPriority(const char* what) {
+  static constexpr int kNice = -12;
+  errno = 0;
+  if (setpriority(PRIO_PROCESS, 0, kNice) != 0) {
+    static std::atomic<bool> reported{false};
+    bool expected = false;
+    if (reported.compare_exchange_strong(expected, true)) {
+      XELOGW("{}: setpriority({}) failed: errno {} ({})", what, kNice, errno,
+             std::strerror(errno));
+    }
+    return;
+  }
+  const int applied = getpriority(PRIO_PROCESS, 0);
+  static std::atomic<bool> logged{false};
+  bool expected = false;
+  if (logged.compare_exchange_strong(expected, true)) {
+    XELOGI("{}: nice set to {}", what, applied);
+  }
+}
+#endif
+
 void AudioSystem::WorkerThreadMain() {
   // Initialize driver and ringbuffer.
   Initialize();
@@ -109,7 +136,8 @@ void AudioSystem::WorkerThreadMain() {
 #if XE_PLATFORM_xendroid
   // Set here, not at the creation site: XThread applies its own priority
   // after Create, and its kNormal maps to nice 4, below the Android default.
-  setpriority(PRIO_PROCESS, 0, -12);
+  // Re-applied in the loop below, because a later set_priority would undo it.
+  ApplyAudioThreadPriority("Audio Worker");
 #endif
 
   // How much of the block budget the wait-any poll loop is eating. A block is
@@ -137,6 +165,9 @@ void AudioSystem::WorkerThreadMain() {
         stats_iters = iters;
         stats_park_ns = park_ns;
         stats_last = now;
+#if XE_PLATFORM_xendroid
+        ApplyAudioThreadPriority("Audio Worker");
+#endif
       }
     }
     // These handles signify the number of submitted samples. Once we reach

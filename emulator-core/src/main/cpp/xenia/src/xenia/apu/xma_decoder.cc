@@ -20,6 +20,8 @@
 #include <sys/resource.h>
 #endif
 
+#include <cerrno>
+#include <cstring>
 #include "xenia/base/logging.h"
 #include "xenia/base/math.h"
 #include "xenia/base/profiling.h"
@@ -205,7 +207,11 @@ void XmaDecoder::WorkerThreadMain() {
 #if XE_PLATFORM_xendroid
   // Set here, not at the creation site: XThread applies its own priority
   // after Create, and its kNormal maps to nice 4, below the Android default.
-  setpriority(PRIO_PROCESS, 0, -12);
+  errno = 0;
+  if (setpriority(PRIO_PROCESS, 0, -12) != 0) {
+    XELOGW("XMA Decoder: setpriority(-12) failed: errno {} ({})", errno,
+           std::strerror(errno));
+  }
 #endif
   while (worker_running_) {
     // Okay, let's loop through XMA contexts to find ones we need to decode!

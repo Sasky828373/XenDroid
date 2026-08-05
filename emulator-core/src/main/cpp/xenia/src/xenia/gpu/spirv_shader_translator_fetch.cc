@@ -16,6 +16,7 @@
 #include "third_party/glslang/SPIRV/GLSL.std.450.h"
 #include "xenia/base/assert.h"
 #include "xenia/base/math.h"
+#include "xenia/gpu/gpu_flags.h"
 #include "xenia/gpu/render_target_cache.h"
 #include "xenia/gpu/spirv_compatibility.h"
 
@@ -1713,27 +1714,37 @@ void SpirvShaderTranslator::ProcessTextureFetchInstruction(
           // bits 22:26, v in bits 27:31. Applied here in the sample path like
           // the fetch-constant LOD bias (getCompTexLOD returns the raw queried
           // LOD, so neither bias is folded into it). Zero (the common case) is
-          // a no-op.
-          spv::Id grad_exp_adjust_h = builder_->createUnaryOp(
-              spv::OpConvertSToF, type_float_,
-              builder_->createTriOp(spv::OpBitFieldSExtract, type_int_,
-                                    fetch_constant_word_4_signed,
-                                    builder_->makeUintConstant(22),
-                                    builder_->makeUintConstant(5)));
-          spv::Id grad_exp_adjust_v = builder_->createUnaryOp(
-              spv::OpConvertSToF, type_float_,
-              builder_->createTriOp(spv::OpBitFieldSExtract, type_int_,
-                                    fetch_constant_word_4_signed,
-                                    builder_->makeUintConstant(27),
-                                    builder_->makeUintConstant(5)));
-          spv::Id lod_gradient_scale_h = builder_->createUnaryBuiltinCall(
-              type_float_, ext_inst_glsl_std_450_, GLSLstd450Exp2,
-              builder_->createNoContractionBinOp(spv::OpFAdd, type_float_, lod,
-                                                 grad_exp_adjust_h));
-          spv::Id lod_gradient_scale_v = builder_->createUnaryBuiltinCall(
-              type_float_, ext_inst_glsl_std_450_, GLSLstd450Exp2,
-              builder_->createNoContractionBinOp(spv::OpFAdd, type_float_, lod,
-                                                 grad_exp_adjust_v));
+          // a no-op, so the whole thing is behind a cvar - the two exp2 calls
+          // and the bitfield extracts land in every gradient fetch, and that is
+          // measurable where fragment shading is the bottleneck. Off collapses
+          // back to one exp2 shared by both axes and ignores the biases.
+          spv::Id lod_gradient_scale_h, lod_gradient_scale_v;
+          if (cvars::texture_gradient_exp_bias) {
+            spv::Id grad_exp_adjust_h = builder_->createUnaryOp(
+                spv::OpConvertSToF, type_float_,
+                builder_->createTriOp(spv::OpBitFieldSExtract, type_int_,
+                                      fetch_constant_word_4_signed,
+                                      builder_->makeUintConstant(22),
+                                      builder_->makeUintConstant(5)));
+            spv::Id grad_exp_adjust_v = builder_->createUnaryOp(
+                spv::OpConvertSToF, type_float_,
+                builder_->createTriOp(spv::OpBitFieldSExtract, type_int_,
+                                      fetch_constant_word_4_signed,
+                                      builder_->makeUintConstant(27),
+                                      builder_->makeUintConstant(5)));
+            lod_gradient_scale_h = builder_->createUnaryBuiltinCall(
+                type_float_, ext_inst_glsl_std_450_, GLSLstd450Exp2,
+                builder_->createNoContractionBinOp(spv::OpFAdd, type_float_,
+                                                   lod, grad_exp_adjust_h));
+            lod_gradient_scale_v = builder_->createUnaryBuiltinCall(
+                type_float_, ext_inst_glsl_std_450_, GLSLstd450Exp2,
+                builder_->createNoContractionBinOp(spv::OpFAdd, type_float_,
+                                                   lod, grad_exp_adjust_v));
+          } else {
+            lod_gradient_scale_h = builder_->createUnaryBuiltinCall(
+                type_float_, ext_inst_glsl_std_450_, GLSLstd450Exp2, lod);
+            lod_gradient_scale_v = lod_gradient_scale_h;
+          }
           switch (instr.dimension) {
             case xenos::FetchOpDimension::k1D: {
               spv::Id gradient_h_x, gradient_v_x;

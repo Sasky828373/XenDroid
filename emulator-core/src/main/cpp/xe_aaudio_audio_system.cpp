@@ -45,8 +45,12 @@ namespace xe {
             AudioDriver* AAudioAudioSystem::CreateDriver(xe::threading::Semaphore* semaphore,
                                       uint32_t frequency, uint32_t channels,
                                       bool need_format_conversion){
-                //FIXME
-                return new AAudioAudioDriver(memory_, semaphore);
+                // The media player creates a driver matching the song:
+                // interleaved host endian stereo at its own rate. Ignoring
+                // these and byte swapping as 5.1 played it as full scale
+                // noise over the game's audio.
+                return new AAudioAudioDriver(memory_, semaphore, frequency,
+                                             channels, need_format_conversion);
             }
         }
     }

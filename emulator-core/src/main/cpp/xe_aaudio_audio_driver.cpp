@@ -39,8 +39,20 @@ namespace aaudio {
 static constexpr uint32_t kStatsIntervalMs = 1000;
 
 AAudioAudioDriver::AAudioAudioDriver(Memory* memory,
-                                     xe::threading::Semaphore* semaphore)
-    : semaphore_(semaphore) {}
+                                     xe::threading::Semaphore* semaphore,
+                                     uint32_t frequency, uint32_t channels,
+                                     bool need_format_conversion)
+    : semaphore_(semaphore),
+      frame_frequency_(frequency),
+      frame_channels_(channels),
+      need_format_conversion_(need_format_conversion),
+      channel_samples_(channels == 6 ? 256 : 768),
+      submit_samples_(channels * (channels == 6 ? 256 : 768)),
+      host_block_samples_(host_frame_channels_ *
+                          (channels == 6 ? 256 : 768)) {
+  assert_true(channels == 6 || channels == 2);
+  last_block_.resize(host_block_samples_, 0.0f);
+}
 
 AAudioAudioDriver::~AAudioAudioDriver() {
   assert_true(frames_queued_.empty());
@@ -51,7 +63,7 @@ bool AAudioAudioDriver::Initialize() {
   {
     std::unique_lock<std::mutex> guard(frames_mutex_);
     for (int i = 0; i < 2; i++) {
-      float* buffer = new float[x360_frame_samples_];
+      float* buffer = new float[submit_samples_];
       frames_unused_.push(buffer);
     }
   }
@@ -81,7 +93,7 @@ bool AAudioAudioDriver::BuildStream() {
     }
 
     AAudioStreamBuilder_setFormat(builder_, AAUDIO_FORMAT_PCM_FLOAT);
-    AAudioStreamBuilder_setSampleRate(builder_, host_frame_frequency_);
+    AAudioStreamBuilder_setSampleRate(builder_, frame_frequency_);
     AAudioStreamBuilder_setChannelCount(builder_, host_frame_channels_);
     AAudioStreamBuilder_setFramesPerDataCallback(builder_, channel_samples_);
     AAudioStreamBuilder_setDataCallback(builder_, AudioCallback, this);
@@ -181,7 +193,7 @@ aaudio_data_callback_result_t AAudioAudioDriver::AudioCallback(
   // channel_samples_ as its source stride, so it must run at that size
   // whatever this callback was handed.
   const int32_t out_samples = numFrames * host_frame_channels_;
-  if (numFrames != static_cast<int32_t>(channel_samples_)) {
+  if (numFrames != static_cast<int32_t>(driver->channel_samples_)) {
     driver->stat_unexpected_frames_.store(numFrames, std::memory_order_relaxed);
   }
 
@@ -194,7 +206,7 @@ aaudio_data_callback_result_t AAudioAudioDriver::AudioCallback(
   uint32_t releases = 0;
   bool gapped = false;
   while (frames_done < numFrames) {
-    if (driver->last_block_pos_ >= channel_samples_) {
+    if (driver->last_block_pos_ >= driver->channel_samples_) {
       float* buffer = nullptr;
       uint32_t depth = 0;
       {
@@ -219,11 +231,17 @@ aaudio_data_callback_result_t AAudioAudioDriver::AudioCallback(
         const int32_t owed_samples = out_samples - done_samples;
         driver->ConcealGap(
             output_buffer + done_samples, owed_samples,
-            std::min(owed_samples, static_cast<int32_t>(host_block_samples_)));
+            std::min(owed_samples, static_cast<int32_t>(driver->host_block_samples_)));
         break;
       }
-      conversion::sequential_6_BE_to_interleaved_2_LE(
-          driver->last_block_, buffer, channel_samples_);
+      if (driver->frame_channels_ == 6) {
+        conversion::sequential_6_BE_to_interleaved_2_LE(
+            driver->last_block_.data(), buffer, driver->channel_samples_);
+      } else {
+        // Media player: already interleaved host endian stereo.
+        std::memcpy(driver->last_block_.data(), buffer,
+                    driver->host_block_samples_ * sizeof(float));
+      }
       driver->ApplyGainAndClamp();
       driver->ApplyFadeIn();
       driver->last_block_valid_ = true;
@@ -237,10 +255,12 @@ aaudio_data_callback_result_t AAudioAudioDriver::AudioCallback(
     }
     const int32_t chunk = std::min<int32_t>(
         numFrames - frames_done,
-        static_cast<int32_t>(channel_samples_ - driver->last_block_pos_));
+        static_cast<int32_t>(driver->channel_samples_ -
+                             driver->last_block_pos_));
     std::memcpy(
         output_buffer + frames_done * host_frame_channels_,
-        driver->last_block_ + driver->last_block_pos_ * host_frame_channels_,
+        driver->last_block_.data() +
+            driver->last_block_pos_ * host_frame_channels_,
         chunk * host_frame_channels_ * sizeof(float));
     driver->last_block_pos_ += static_cast<uint32_t>(chunk);
     frames_done += chunk;
@@ -449,14 +469,14 @@ void AAudioAudioDriver::SubmitFrame(float* samples) {
   {
     std::unique_lock<std::mutex> guard(frames_mutex_);
     if (frames_unused_.empty()) {
-      output_frame = new float[x360_frame_samples_];
+      output_frame = new float[submit_samples_];
     } else {
       output_frame = frames_unused_.top();
       frames_unused_.pop();
     }
   }
 
-  std::memcpy(output_frame, samples, x360_frame_samples_ * sizeof(float));
+  std::memcpy(output_frame, samples, submit_samples_ * sizeof(float));
 
   {
     std::unique_lock<std::mutex> guard(frames_mutex_);

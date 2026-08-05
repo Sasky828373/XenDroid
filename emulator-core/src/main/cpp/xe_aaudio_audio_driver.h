@@ -10,6 +10,7 @@
 #define XENDROID_XE_AAUDIO_AUDIO_DRIVER_H
 
 #include <atomic>
+#include <vector>
 #include <condition_variable>
 #include <mutex>
 #include <queue>
@@ -27,7 +28,13 @@ namespace aaudio {
 
 class AAudioAudioDriver : public AudioDriver {
  public:
-  AAudioAudioDriver(Memory* memory, xe::threading::Semaphore* semaphore);
+  // channels selects the submit contract, mirroring SDLAudioDriver: 6 is the
+  // game path, 256 samples per channel of sequential big endian 5.1; 2 is the
+  // media player, 768 frames of interleaved host endian stereo played at the
+  // song's own rate. Both are 1536 floats per SubmitFrame.
+  AAudioAudioDriver(Memory* memory, xe::threading::Semaphore* semaphore,
+                    uint32_t frequency = 48000, uint32_t channels = 6,
+                    bool need_format_conversion = true);
   ~AAudioAudioDriver() override;
 
   bool Initialize();
@@ -83,18 +90,21 @@ class AAudioAudioDriver : public AudioDriver {
   bool recovery_quit_ = false;
   std::atomic<bool> shutting_down_{false};
 
-  static constexpr uint32_t host_frame_frequency_ = 48000;
   static constexpr uint32_t host_frame_channels_ = 2;
-  static constexpr uint32_t channel_samples_ = 256;
-  static constexpr uint32_t x360_frame_samples_ = 6 * channel_samples_;
-  static constexpr uint32_t host_block_samples_ = host_frame_channels_ * channel_samples_;
+  // Fixed by the creation contract, see the constructor.
+  const uint32_t frame_frequency_;
+  const uint32_t frame_channels_;
+  const bool need_format_conversion_;
+  const uint32_t channel_samples_;
+  const uint32_t submit_samples_;
+  const uint32_t host_block_samples_;
   std::queue<float*> frames_queued_ = {};
   std::stack<float*> frames_unused_ = {};
   std::mutex frames_mutex_ = {};
 
   // Underrun concealment: silence would put a step at both edges of every
   // gap, a ~187Hz click train at a 5.3ms block. Callback thread only.
-  float last_block_[host_block_samples_] = {};
+  std::vector<float> last_block_;
   bool last_block_valid_ = false;
   // Frames of last_block_ already handed to the device. A callback size that
   // is not exactly channel_samples_ would otherwise drop or duplicate audio.

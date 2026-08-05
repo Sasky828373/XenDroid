@@ -1836,7 +1836,7 @@ void EmulatorWindow::AddRecentlyLaunchedTitle(
 
 void EmulatorWindow::ClearDialogs() {
   imgui_drawer_.get()->ClearDialogs();
-  emulator_->kernel_state()->xam_state()->xam_dialogs_shown_ = 0;
+  emulator_->kernel_state()->xam_state()->is_xam_dialog_present_.store(false);
 }
 
 }  // namespace app

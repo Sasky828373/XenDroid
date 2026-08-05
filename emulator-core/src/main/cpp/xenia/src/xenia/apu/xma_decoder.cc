@@ -224,6 +224,7 @@ void XmaDecoder::WorkerThreadMain() {
   uint64_t last_decoded = 0, last_no_out = 0, last_consume_empty = 0,
            last_no_space = 0;
 
+  worker_loop_active_.store(true, std::memory_order_release);
   while (worker_running_) {
     // Okay, let's loop through XMA contexts to find ones we need to decode!
     bool did_work = false;
@@ -286,6 +287,7 @@ void XmaDecoder::WorkerThreadMain() {
     }
     xe::threading::Wait(work_event_.get(), false);
   }
+  worker_loop_active_.store(false, std::memory_order_release);
 }
 
 void XmaDecoder::Shutdown() {
@@ -500,7 +502,12 @@ void XmaDecoder::Pause() {
     work_event_->Set();
   }
 
-  pause_fence_.Wait();
+  // With inline decoding there is no worker loop to quiesce, so nothing will
+  // ever signal the fence: waiting here hangs the caller, and the pause comes
+  // from the UI thread.
+  if (worker_loop_active_.load(std::memory_order_acquire)) {
+    pause_fence_.Wait();
+  }
 }
 
 void XmaDecoder::Resume() {
@@ -509,7 +516,9 @@ void XmaDecoder::Resume() {
   }
   paused_ = false;
 
-  resume_fence_.Signal();
+  if (worker_loop_active_.load(std::memory_order_acquire)) {
+    resume_fence_.Signal();
+  }
 }
 
 }  // namespace apu

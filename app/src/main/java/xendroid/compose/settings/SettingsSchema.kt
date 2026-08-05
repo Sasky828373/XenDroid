@@ -165,6 +165,7 @@ object SettingsSchema {
                 "performance" to "performance", "accuracy" to "accuracy"),
             b("GPU", "half_pixel_offset", "Half-pixel offset", true),
             b("GPU", "texture_gradient_exp_bias", "Per-axis gradient LOD bias", false),
+            b("GPU", "texture_integer_num_format", "Integer num_format texture scaling", false),
             b("GPU", "log_ringbuffer_kickoff_initiator_bts", "Log ringbuffer kickoff initiator BTs", false),
             i("GPU", "texture_cache_memory_limit_hard", "Texture cache hard limit (MB)", 768, 512, 4096),
             b("GPU", "gpu_allow_invalid_fetch_constants", "Allow invalid fetch constants", true),

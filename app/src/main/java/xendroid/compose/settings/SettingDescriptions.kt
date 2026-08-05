@@ -94,6 +94,7 @@ object SettingDescriptions {
         "texture_cache_memory_limit_hard" to "Host texture memory cap in MB; textures above it are destroyed as soon as possible",
         "texture_cache_memory_limit_soft" to "Texture cache size in MB above which old unused textures start being evicted",
         "texture_gradient_exp_bias" to "Honor per-axis mipmap bias when sampling; more accurate but adds shader cost to every gradient texture fetch",
+        "texture_integer_num_format" to "Rescale integer-format textures to guest units; more accurate but adds shader cost to every affected texture fetch",
         "time_scalar" to "Speeds up or slows down guest time (1 = normal, 2 = double speed, 0.5 = half)",
         "trace_function_coverage" to "Records per-instruction coverage statistics for compiled functions; developer debugging aid",
         "trace_function_references" to "Records function address references during JIT compilation for developer analysis",

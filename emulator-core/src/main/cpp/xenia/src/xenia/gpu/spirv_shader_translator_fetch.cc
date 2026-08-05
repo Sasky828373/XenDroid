@@ -20,6 +20,8 @@
 #include "xenia/gpu/render_target_cache.h"
 #include "xenia/gpu/spirv_compatibility.h"
 
+DECLARE_bool(texture_integer_num_format);
+
 namespace xe {
 namespace gpu {
 
@@ -2406,6 +2408,12 @@ void SpirvShaderTranslator::ProcessTextureFetchInstruction(
         // num_format is applied after signs/gamma. Fixed textures sample as
         // normalized host values, so integer num_format scales them back to
         // guest integer units here.
+        //
+        // Gated at translation time, not just on the host side: the uniform
+        // load, the branch and the whole scaling body land in every texture
+        // fetch whether or not any bound texture asks for it, and zeroing the
+        // scale bits only stops the branch being taken. Off emits nothing.
+        if (cvars::texture_integer_num_format) {
         id_vector_temp_.clear();
         id_vector_temp_.push_back(
             builder_->makeIntConstant(kSystemConstantTextureIntegerScaleBits));
@@ -2477,6 +2485,7 @@ void SpirvShaderTranslator::ProcessTextureFetchInstruction(
                 scaled_result[result_component_index],
                 result[result_component_index]);
           }
+        }
         }
 
         // Apply the exponent bias from the bits 13:18 of the fetch constant

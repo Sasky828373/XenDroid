@@ -61,6 +61,16 @@ DEFINE_uint32(
     "textures - so with 2x2 resolution scaling, the soft limit will be 360 + "
     "96 MB, and with 3x3, it will be 360 + 216 MB.",
     "GPU");
+DEFINE_bool(
+    texture_integer_num_format, false,
+    "Honour the texture fetch constant's integer num_format bit by scaling "
+    "sampled components back to guest integer units (x255 for 8-bit, x65535 "
+    "for 16-bit). Costs a per-component rescale inside every texture fetch that "
+    "requests it, which is measurable where fragment shading is the "
+    "bottleneck. Off samples everything as normalized, which is what the "
+    "emulator did before upstream implemented this.",
+    "GPU");
+
 DEFINE_bool(tiled_shared_memory, true,
             "Enable tiled/sparse resources for efficient large address space "
             "support. Disable for graphics debugger compatibility.",
@@ -768,6 +778,23 @@ uint32_t TextureCache::GetIntegerScaleBits(xenos::TextureFormat guest_format,
   uint32_t scale_bits = 0;
 
   if (!num_format || !format_info.fixed) {
+    return 0;
+  }
+
+  // Report what the guest asked for even when the scaling is disabled, so a
+  // silent log does not get mistaken for "the title never sets num_format".
+  {
+    static std::atomic<uint32_t> logged{0};
+    if (logged.fetch_add(1, std::memory_order_relaxed) < 8) {
+      XELOGW(
+          "Texture integer num_format requested for {} (swizzle {:#x}, signs "
+          "{:#x}) - scaling {}",
+          FormatInfo::GetName(format_info.format), host_swizzle,
+          swizzled_signs,
+          cvars::texture_integer_num_format ? "applied" : "SUPPRESSED by cvar");
+    }
+  }
+  if (!cvars::texture_integer_num_format) {
     return 0;
   }
 

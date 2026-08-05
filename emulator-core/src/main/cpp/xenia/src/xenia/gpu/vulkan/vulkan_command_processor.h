@@ -234,6 +234,15 @@ class VulkanCommandProcessor final : public CommandProcessor {
   // render pass will also be closed.
   bool SubmitBarriers(bool force_end_render_pass);
 
+  // If [base_bytes, base_bytes + size_bytes) holds memexport output (which
+  // under two-buffer routing lives in the host-imported buffer aliasing guest
+  // RAM), copies it into the device-local buffer so a following device-buffer
+  // read - a texture load - sees it. No-op for non-memexport ranges (already in
+  // the device buffer) and when the host buffer is unavailable. Called by the
+  // texture cache before loading a texture. Ends the render pass.
+  void EnsureMemexportRangeInDeviceBuffer(uint32_t base_bytes,
+                                          uint32_t size_bytes);
+
   // If not started yet, begins a render pass from the render target cache.
   // Submission must be open.
   void SubmitBarriersAndEnterRenderTargetCacheRenderPass(
@@ -343,9 +352,6 @@ class VulkanCommandProcessor final : public CommandProcessor {
                  IndexBufferInfo* index_buffer_info,
                  bool major_mode_explicit) override;
   bool IssueCopy() override;
-
-  void IssueDraw_MemexportReadbackFullPath(uint32_t memexport_total_size);
-  void IssueDraw_MemexportReadbackFastPath(uint32_t memexport_total_size);
 
   void InitializeTrace() override;
 
@@ -491,9 +497,6 @@ class VulkanCommandProcessor final : public CommandProcessor {
     return !submission_open_ &&
            GetCompletedSubmission() + 1u >= GetCurrentSubmission();
   }
-
-  // Requests a readback buffer for CPU access to GPU data.
-  VkBuffer RequestReadbackBuffer(uint32_t size);
 
   void ClearTransientDescriptorPools();
 
@@ -854,6 +857,16 @@ class VulkanCommandProcessor final : public CommandProcessor {
 
   VkDescriptorPool shared_memory_and_edram_descriptor_pool_ = VK_NULL_HANDLE;
   VkDescriptorSet shared_memory_and_edram_descriptor_set_;
+  // Second set identical to the one above except binding 0 points at the
+  // host-imported shared-memory buffer (aliasing guest RAM). Bound instead of
+  // the device set for memexport-touching draws so their GPU-written geometry
+  // stays coherent with the CPU. VK_NULL_HANDLE when the host buffer is
+  // unavailable - routing is then disabled and every draw uses the device set.
+  VkDescriptorSet shared_memory_host_and_edram_descriptor_set_ = VK_NULL_HANDLE;
+  // Two-buffer memexport page tracking (data + methods), shared with the D3D12
+  // backend as a class-body fragment so each backend gets its own non-virtual,
+  // inlinable copy. Requires <array> and SharedMemory, both included above.
+#include "../command_processor_memexport.inc"
 
   // Bytes 0x0...0x3FF - 256-entry gamma ramp table with B10G10R10X2 data (read
   // as R10G10B10X2 with swizzle).
@@ -1222,6 +1235,19 @@ class VulkanCommandProcessor final : public CommandProcessor {
     VkDeviceMemory memories[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
     uint32_t sizes[2] = {0, 0};
     void* mapped_data[2] = {nullptr, nullptr};  // Persistent mappings
+    // Host memory type of buffers[i], to invalidate the CPU cache before
+    // reading when the readback memory is not host-coherent.
+    uint32_t memory_type_indices[2] = {0, 0};
+    // Device-local snapshot of the resolved region, filled by the graphics
+    // queue so the transfer copy reads it instead of shared memory a later
+    // resolve would overwrite. One per slot, paired with buffers[].
+    VkBuffer snapshot_buffers[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
+    VkDeviceMemory snapshot_memories[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
+    uint32_t snapshot_sizes[2] = {0, 0};
+    // Transfer submission that filled buffers[i]. The CPU read of buffers[i]
+    // and the graphics reuse of snapshot_buffers[i] wait on it. 0 = none in
+    // flight.
+    uint64_t transfer_submission[2] = {0, 0};
     uint32_t current_index = 0;
     uint64_t last_used_frame = 0;
     // uma mode only: the submission index that last resolved this destination.
@@ -1232,11 +1258,10 @@ class VulkanCommandProcessor final : public CommandProcessor {
 
   // A resolve readback copy deferred to the transfer queue (DMA engine),
   // flushed as a batch after the graphics submission that produced its source
-  // data.
+  // data. Copies snapshot_buffers[buffer_index] -> buffers[buffer_index].
   struct PendingReadbackCopy {
     ReadbackBuffer* readback_buffer;
     uint32_t buffer_index;
-    uint32_t src_offset;
     uint32_t size;
   };
 
@@ -1254,6 +1279,22 @@ class VulkanCommandProcessor final : public CommandProcessor {
   void EvictOldReadbackBuffers(
       std::unordered_map<uint64_t, ReadbackBuffer>& buffer_map);
 
+  // Allocates a device-local buffer shared concurrently with the transfer
+  // queue, used as the private snapshot the graphics queue copies resolved data
+  // into. Returns false on failure (handles left VK_NULL_HANDLE).
+  bool CreateReadbackSnapshotBuffer(uint32_t size, VkBuffer& buffer_out,
+                                    VkDeviceMemory& memory_out);
+
+  // Destroys a readback buffer's host buffers, snapshots and mappings. The GPU
+  // must no longer be using them.
+  void DestroyReadbackBuffer(ReadbackBuffer& rb);
+
+  // Invalidates the CPU cache for the finished slot then copies it to guest
+  // memory. The GPU copy that filled the slot must have completed.
+  void CopyReadbackBufferToGuest(const ReadbackBuffer& rb, uint32_t index,
+                                 uint32_t written_address,
+                                 uint32_t written_length);
+
   // Map: (written_address << 32 | written_length) -> ReadbackBuffer
   std::unordered_map<uint64_t, ReadbackBuffer> readback_buffers_;
 
@@ -1266,15 +1307,6 @@ class VulkanCommandProcessor final : public CommandProcessor {
   std::vector<VkSemaphore> transfer_wait_semaphores_free_;
   std::deque<std::pair<uint64_t, VkSemaphore>>
       transfer_wait_semaphores_in_flight_;
-
-  // Simple single buffer for memexport (full mode - always syncs, no
-  // double-buffering)
-  VkBuffer memexport_readback_buffer_ = VK_NULL_HANDLE;
-  VkDeviceMemory memexport_readback_buffer_memory_ = VK_NULL_HANDLE;
-  uint32_t memexport_readback_buffer_size_ = 0;
-
-  // Per-memexport double-buffered readback for fast mode (delayed sync)
-  std::unordered_map<uint64_t, ReadbackBuffer> memexport_readback_buffers_;
 
   // Debug marker support for RenderDoc/debug tools.
   bool debug_markers_enabled_ = false;

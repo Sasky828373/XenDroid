@@ -128,7 +128,6 @@ DEFINE_bool(
     "Vulkan");
 
 DECLARE_bool(gpu_debug_markers);
-DECLARE_bool(readback_memexport_fast);
 DECLARE_bool(submit_on_primary_buffer_end);
 DECLARE_bool(vulkan_placeholder_pipelines);
 
@@ -254,12 +253,15 @@ void VulkanCommandProcessor::InvalidateGpuMemory() {
 }
 
 void VulkanCommandProcessor::ClearReadbackBuffers() {
-  // Pending copies hold pointers into readback_buffers_, and in-flight transfer
-  // copies target its buffers, so drain and drop them before clearing.
+  // Both queues may still be reading or writing these buffers, so drain them
+  // before freeing. Pending copies hold pointers into readback_buffers_.
+  AwaitAllQueueOperationsCompletion();
   transfer_completion_timeline_.AwaitAllSubmissions();
   pending_readback_copies_.clear();
+  for (auto& pair : readback_buffers_) {
+    DestroyReadbackBuffer(pair.second);
+  }
   readback_buffers_.clear();
-  memexport_readback_buffers_.clear();
 }
 
 void VulkanCommandProcessor::TracePlaybackWroteMemory(uint32_t base_ptr,
@@ -644,18 +646,25 @@ bool VulkanCommandProcessor::SetupContext() {
     }
   }
 
-  // Shared memory, EDRAM, and ZPD FSI counter common bindings.
+  // Shared memory, EDRAM, and ZPD FSI counter common bindings. A second set
+  // (binding 0 -> host-imported buffer) is allocated for memexport routing when
+  // the host buffer is available.
+  const bool create_host_shared_memory_set =
+      shared_memory_->host_buffer() != VK_NULL_HANDLE;
+  const uint32_t shared_memory_set_count =
+      create_host_shared_memory_set ? 2u : 1u;
   VkDescriptorPoolSize descriptor_pool_sizes[1];
   descriptor_pool_sizes[0].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
   descriptor_pool_sizes[0].descriptorCount =
-      shared_memory_binding_count +
-      2u * uint32_t(edram_fragment_shader_interlock);
+      shared_memory_set_count *
+      (shared_memory_binding_count +
+       2u * uint32_t(edram_fragment_shader_interlock));
   VkDescriptorPoolCreateInfo descriptor_pool_create_info;
   descriptor_pool_create_info.sType =
       VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
   descriptor_pool_create_info.pNext = nullptr;
   descriptor_pool_create_info.flags = 0;
-  descriptor_pool_create_info.maxSets = 1;
+  descriptor_pool_create_info.maxSets = shared_memory_set_count;
   descriptor_pool_create_info.poolSizeCount = 1;
   descriptor_pool_create_info.pPoolSizes = descriptor_pool_sizes;
   if (dfn.vkCreateDescriptorPool(device, &descriptor_pool_create_info, nullptr,
@@ -683,81 +692,92 @@ bool VulkanCommandProcessor::SetupContext() {
         "EDRAM");
     return false;
   }
-  VkDescriptorBufferInfo
-      shared_memory_descriptor_buffers_info[SharedMemory::kBufferSize /
-                                            (128 << 20)];
-  uint32_t shared_memory_binding_range =
-      SharedMemory::kBufferSize >> shared_memory_binding_count_log2;
-  for (uint32_t i = 0; i < shared_memory_binding_count; ++i) {
-    VkDescriptorBufferInfo& shared_memory_descriptor_buffer_info =
-        shared_memory_descriptor_buffers_info[i];
-    shared_memory_descriptor_buffer_info.buffer = shared_memory_->buffer();
-    shared_memory_descriptor_buffer_info.offset =
-        shared_memory_binding_range * i;
-    shared_memory_descriptor_buffer_info.range = shared_memory_binding_range;
+  if (create_host_shared_memory_set) {
+    if (dfn.vkAllocateDescriptorSets(
+            device, &descriptor_set_allocate_info,
+            &shared_memory_host_and_edram_descriptor_set_) != VK_SUCCESS) {
+      XELOGE(
+          "Failed to allocate the host-imported Vulkan descriptor set for "
+          "shared memory memexport routing");
+      return false;
+    }
   }
-  VkWriteDescriptorSet write_descriptor_sets[3];
-  VkWriteDescriptorSet& write_descriptor_set_shared_memory =
-      write_descriptor_sets[0];
-  write_descriptor_set_shared_memory.sType =
-      VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-  write_descriptor_set_shared_memory.pNext = nullptr;
-  write_descriptor_set_shared_memory.dstSet =
-      shared_memory_and_edram_descriptor_set_;
-  write_descriptor_set_shared_memory.dstBinding = 0;
-  write_descriptor_set_shared_memory.dstArrayElement = 0;
-  write_descriptor_set_shared_memory.descriptorCount =
-      shared_memory_binding_count;
-  write_descriptor_set_shared_memory.descriptorType =
-      VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-  write_descriptor_set_shared_memory.pImageInfo = nullptr;
-  write_descriptor_set_shared_memory.pBufferInfo =
-      shared_memory_descriptor_buffers_info;
-  write_descriptor_set_shared_memory.pTexelBufferView = nullptr;
-  VkDescriptorBufferInfo edram_descriptor_buffer_info;
-  if (edram_fragment_shader_interlock) {
-    edram_descriptor_buffer_info.buffer = render_target_cache_->edram_buffer();
-    edram_descriptor_buffer_info.offset = 0;
-    edram_descriptor_buffer_info.range = VK_WHOLE_SIZE;
-    VkWriteDescriptorSet& write_descriptor_set_edram = write_descriptor_sets[1];
-    write_descriptor_set_edram.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    write_descriptor_set_edram.pNext = nullptr;
-    write_descriptor_set_edram.dstSet = shared_memory_and_edram_descriptor_set_;
-    write_descriptor_set_edram.dstBinding = 1;
-    write_descriptor_set_edram.dstArrayElement = 0;
-    write_descriptor_set_edram.descriptorCount = 1;
-    write_descriptor_set_edram.descriptorType =
-        VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    write_descriptor_set_edram.pImageInfo = nullptr;
-    write_descriptor_set_edram.pBufferInfo = &edram_descriptor_buffer_info;
-    write_descriptor_set_edram.pTexelBufferView = nullptr;
-    // ZPD FSI counter.
+  // Writes binding 0 (shared memory, split across shared_memory_binding_count
+  // sub-ranges) and, under FSI, binding 1 (EDRAM) and binding 2 (ZPD FSI
+  // counter placeholder) of one shared-memory/EDRAM set. shared_memory_buffer
+  // selects the device-local buffer or the host-imported buffer.
+  auto write_shared_memory_and_edram_set = [&](VkDescriptorSet set,
+                                               VkBuffer shared_memory_buffer) {
+    VkDescriptorBufferInfo
+        shared_memory_descriptor_buffers_info[SharedMemory::kBufferSize /
+                                              (128 << 20)];
+    uint32_t shared_memory_binding_range =
+        SharedMemory::kBufferSize >> shared_memory_binding_count_log2;
+    for (uint32_t i = 0; i < shared_memory_binding_count; ++i) {
+      VkDescriptorBufferInfo& info = shared_memory_descriptor_buffers_info[i];
+      info.buffer = shared_memory_buffer;
+      info.offset = shared_memory_binding_range * i;
+      info.range = shared_memory_binding_range;
+    }
+    VkWriteDescriptorSet write_descriptor_sets[3];
+    VkWriteDescriptorSet& write_shared_memory = write_descriptor_sets[0];
+    write_shared_memory.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    write_shared_memory.pNext = nullptr;
+    write_shared_memory.dstSet = set;
+    write_shared_memory.dstBinding = 0;
+    write_shared_memory.dstArrayElement = 0;
+    write_shared_memory.descriptorCount = shared_memory_binding_count;
+    write_shared_memory.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    write_shared_memory.pImageInfo = nullptr;
+    write_shared_memory.pBufferInfo = shared_memory_descriptor_buffers_info;
+    write_shared_memory.pTexelBufferView = nullptr;
+    VkDescriptorBufferInfo edram_descriptor_buffer_info;
     VkDescriptorBufferInfo zpd_fsi_counter_descriptor_buffer_info;
-    zpd_fsi_counter_descriptor_buffer_info.buffer =
-        zpd_fsi_counter_sink_buffer_;
-    zpd_fsi_counter_descriptor_buffer_info.offset = 0;
-    zpd_fsi_counter_descriptor_buffer_info.range = zpd_fsi_counter_sink_range;
-    // Keep binding 2 valid until the real counter buffer is ready.
-    VkWriteDescriptorSet& write_descriptor_set_zpd_fsi_counter_init =
-        write_descriptor_sets[2];
-    write_descriptor_set_zpd_fsi_counter_init.sType =
-        VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    write_descriptor_set_zpd_fsi_counter_init.pNext = nullptr;
-    write_descriptor_set_zpd_fsi_counter_init.dstSet =
-        shared_memory_and_edram_descriptor_set_;
-    write_descriptor_set_zpd_fsi_counter_init.dstBinding = 2;
-    write_descriptor_set_zpd_fsi_counter_init.dstArrayElement = 0;
-    write_descriptor_set_zpd_fsi_counter_init.descriptorCount = 1;
-    write_descriptor_set_zpd_fsi_counter_init.descriptorType =
-        VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    write_descriptor_set_zpd_fsi_counter_init.pImageInfo = nullptr;
-    write_descriptor_set_zpd_fsi_counter_init.pBufferInfo =
-        &zpd_fsi_counter_descriptor_buffer_info;
-    write_descriptor_set_zpd_fsi_counter_init.pTexelBufferView = nullptr;
+    if (edram_fragment_shader_interlock) {
+      edram_descriptor_buffer_info.buffer =
+          render_target_cache_->edram_buffer();
+      edram_descriptor_buffer_info.offset = 0;
+      edram_descriptor_buffer_info.range = VK_WHOLE_SIZE;
+      VkWriteDescriptorSet& write_edram = write_descriptor_sets[1];
+      write_edram.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+      write_edram.pNext = nullptr;
+      write_edram.dstSet = set;
+      write_edram.dstBinding = 1;
+      write_edram.dstArrayElement = 0;
+      write_edram.descriptorCount = 1;
+      write_edram.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+      write_edram.pImageInfo = nullptr;
+      write_edram.pBufferInfo = &edram_descriptor_buffer_info;
+      write_edram.pTexelBufferView = nullptr;
+      // ZPD FSI counter - kept valid until the real counter buffer is ready.
+      zpd_fsi_counter_descriptor_buffer_info.buffer =
+          zpd_fsi_counter_sink_buffer_;
+      zpd_fsi_counter_descriptor_buffer_info.offset = 0;
+      zpd_fsi_counter_descriptor_buffer_info.range = zpd_fsi_counter_sink_range;
+      VkWriteDescriptorSet& write_zpd_fsi_counter = write_descriptor_sets[2];
+      write_zpd_fsi_counter.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+      write_zpd_fsi_counter.pNext = nullptr;
+      write_zpd_fsi_counter.dstSet = set;
+      write_zpd_fsi_counter.dstBinding = 2;
+      write_zpd_fsi_counter.dstArrayElement = 0;
+      write_zpd_fsi_counter.descriptorCount = 1;
+      write_zpd_fsi_counter.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+      write_zpd_fsi_counter.pImageInfo = nullptr;
+      write_zpd_fsi_counter.pBufferInfo =
+          &zpd_fsi_counter_descriptor_buffer_info;
+      write_zpd_fsi_counter.pTexelBufferView = nullptr;
+    }
+    dfn.vkUpdateDescriptorSets(
+        device, 1 + 2 * uint32_t(edram_fragment_shader_interlock),
+        write_descriptor_sets, 0, nullptr);
+  };
+  write_shared_memory_and_edram_set(shared_memory_and_edram_descriptor_set_,
+                                    shared_memory_->buffer());
+  if (create_host_shared_memory_set) {
+    write_shared_memory_and_edram_set(
+        shared_memory_host_and_edram_descriptor_set_,
+        shared_memory_->host_buffer());
   }
-  dfn.vkUpdateDescriptorSets(device,
-                             1 + 2 * uint32_t(edram_fragment_shader_interlock),
-                             write_descriptor_sets, 0, nullptr);
   if (edram_fragment_shader_interlock) {
     zpd_fsi_counter_descriptor_buffer_ = zpd_fsi_counter_sink_buffer_;
     zpd_fsi_counter_descriptor_range_ = zpd_fsi_counter_sink_range;
@@ -1715,49 +1735,17 @@ void VulkanCommandProcessor::ShutdownContext() {
 
   // Clean up all readback buffers.
   for (auto& pair : readback_buffers_) {
-    for (int i = 0; i < 2; i++) {
-      if (pair.second.mapped_data[i] != nullptr) {
-        dfn.vkUnmapMemory(device, pair.second.memories[i]);
-      }
-    }
-    ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyBuffer, device,
-                                           pair.second.buffers[0]);
-    ui::vulkan::util::DestroyAndNullHandle(dfn.vkFreeMemory, device,
-                                           pair.second.memories[0]);
-    ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyBuffer, device,
-                                           pair.second.buffers[1]);
-    ui::vulkan::util::DestroyAndNullHandle(dfn.vkFreeMemory, device,
-                                           pair.second.memories[1]);
+    DestroyReadbackBuffer(pair.second);
   }
   readback_buffers_.clear();
-
-  // Clean up all memexport readback buffers.
-  for (auto& pair : memexport_readback_buffers_) {
-    for (int i = 0; i < 2; i++) {
-      if (pair.second.mapped_data[i] != nullptr) {
-        dfn.vkUnmapMemory(device, pair.second.memories[i]);
-      }
-    }
-    ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyBuffer, device,
-                                           pair.second.buffers[0]);
-    ui::vulkan::util::DestroyAndNullHandle(dfn.vkFreeMemory, device,
-                                           pair.second.memories[0]);
-    ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyBuffer, device,
-                                           pair.second.buffers[1]);
-    ui::vulkan::util::DestroyAndNullHandle(dfn.vkFreeMemory, device,
-                                           pair.second.memories[1]);
-  }
-  memexport_readback_buffers_.clear();
-
-  ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyBuffer, device,
-                                         memexport_readback_buffer_);
-  ui::vulkan::util::DestroyAndNullHandle(dfn.vkFreeMemory, device,
-                                         memexport_readback_buffer_memory_);
-  memexport_readback_buffer_size_ = 0;
 
   ui::vulkan::util::DestroyAndNullHandle(
       dfn.vkDestroyDescriptorPool, device,
       shared_memory_and_edram_descriptor_pool_);
+  // Both sets are freed with the pool - drop the routing handle so it stays
+  // null (routing disabled) until the pool is recreated.
+  shared_memory_host_and_edram_descriptor_set_ = VK_NULL_HANDLE;
+  ResetMemexportPages();
   zpd_fsi_counter_descriptor_buffer_ = VK_NULL_HANDLE;
   zpd_fsi_counter_descriptor_range_ = 0;
   ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyBuffer, device,
@@ -3162,16 +3150,10 @@ void VulkanCommandProcessor::SubmitBarriersAndEnterRenderTargetCacheRenderPass(
     }
   }
 
-  // End current render pass/rendering if active.
-  if (in_render_pass_) {
-    if (use_dynamic_rendering) {
-      deferred_command_buffer_.CmdVkEndRendering();
-    } else {
-      deferred_command_buffer_.CmdVkEndRenderPass();
-    }
-    in_render_pass_ = false;
-    ClosePassTimestamp();
-  }
+  // End current render pass/rendering if active, via EndRenderPass so any open
+  // occlusion query segment is closed first. A query begun inside the pass must
+  // be ended before the pass is. Also closes the fork's pass timestamp.
+  EndRenderPass();
 
   current_render_pass_ = use_dynamic_rendering ? VK_NULL_HANDLE : render_pass;
   current_framebuffer_ = framebuffer;
@@ -3262,16 +3244,10 @@ void VulkanCommandProcessor::SubmitBarriersAndEnterRenderTargetCacheRenderPass(
     }
   }
 
-  // End current render pass/rendering if active.
-  if (in_render_pass_) {
-    if (use_dynamic_rendering) {
-      deferred_command_buffer_.CmdVkEndRendering();
-    } else {
-      deferred_command_buffer_.CmdVkEndRenderPass();
-    }
-    in_render_pass_ = false;
-    ClosePassTimestamp();
-  }
+  // End current render pass/rendering if active, via EndRenderPass so any open
+  // occlusion query segment is closed first. A query begun inside the pass must
+  // be ended before the pass is. Also closes the fork's pass timestamp.
+  EndRenderPass();
 
   current_render_pass_ = use_dynamic_rendering ? VK_NULL_HANDLE : render_pass;
   current_framebuffer_ = framebuffer;
@@ -3777,6 +3753,13 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   if (edram_mode == xenos::EdramMode::kCopy) {
     // Special copy handling.
     return IssueCopy();
+  }
+
+  if (regs.Get<reg::RB_SURFACE_INFO>().surface_pitch == 0) {
+    // Doesn't actually draw. Matches the Direct3D 12 backend.
+    // TODO(Triang3l): Do something so memexport still works in this case maybe?
+    // Unlikely that zero would even really be legal though.
+    return true;
   }
 
   const ui::vulkan::VulkanDevice::Properties& device_properties =
@@ -4424,6 +4407,44 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     }
   }
 
+  // Two-buffer memexport routing: producer and geometry-consumer draws use the
+  // host-imported buffer (aliasing guest RAM) so memexport output stays CPU
+  // coherent (fixing the page false-sharing clobber) and consumers read it
+  // directly. Only texture-sampled ranges are copied into the device buffer
+  // (EnsureMemexportRangeInDeviceBuffer). Inert without the host buffer.
+  bool route_to_host = false;
+  if (shared_memory_host_and_edram_descriptor_set_ != VK_NULL_HANDLE) {
+    route_to_host =
+        !memexport_ranges_.empty() ||
+        (any_memexport_pages_written_ &&
+         ((primitive_processing_result.index_buffer_type ==
+               PrimitiveProcessor::ProcessedIndexBufferType::kGuestDMA &&
+           IsMemexportRange(
+               primitive_processing_result.guest_index_base,
+               primitive_processing_result.guest_draw_vertex_count *
+                   uint32_t(sizeof(uint32_t)))) ||
+          VertexFetchInMemexportRange(regs, *vertex_shader)));
+  }
+  {
+    // Select this draw's shared-memory set, forcing a re-bind only if it
+    // changed. Both sets are pre-written, so the values-up-to-date bits stay
+    // set (never cleared here - the flush asserts on them); only the bound-set
+    // tracking is touched.
+    VkDescriptorSet shared_memory_set =
+        route_to_host ? shared_memory_host_and_edram_descriptor_set_
+                      : shared_memory_and_edram_descriptor_set_;
+    if (current_graphics_descriptor_sets_
+            [SpirvShaderTranslator::kDescriptorSetSharedMemoryAndEdram] !=
+        shared_memory_set) {
+      current_graphics_descriptor_sets_
+          [SpirvShaderTranslator::kDescriptorSetSharedMemoryAndEdram] =
+              shared_memory_set;
+      current_graphics_descriptor_sets_bound_up_to_date_ &=
+          ~(UINT32_C(1)
+            << SpirvShaderTranslator::kDescriptorSetSharedMemoryAndEdram);
+    }
+  }
+
   // Update uniform buffers and descriptor sets after binding the pipeline with
   // the new layout.
   if (!UpdateBindings(vertex_shader, pixel_shader, stage_bindings_ready[0],
@@ -4525,7 +4546,11 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   for (const draw_util::MemExportRange& memexport_range : memexport_ranges_) {
     uint32_t memexport_range_base_bytes = memexport_range.base_address_dwords
                                           << 2;
-    if (!shared_memory_->RequestRange(memexport_range_base_bytes,
+    // Host-routed producers write output to host_buffer_ (guest RAM), not the
+    // device buffer, so this upload is redundant. It also drops the draw when
+    // the guest committed only part of the declared capacity, so skip it.
+    if (!route_to_host &&
+        !shared_memory_->RequestRange(memexport_range_base_bytes,
                                       memexport_range.size_bytes)) {
       XELOGE(
           "Failed to request memexport stream at 0x{:08X} (size {}) in the "
@@ -4615,7 +4640,8 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     std::pair<VkBuffer, VkDeviceSize> index_buffer;
     switch (primitive_processing_result.index_buffer_type) {
       case PrimitiveProcessor::ProcessedIndexBufferType::kGuestDMA:
-        index_buffer.first = shared_memory_->buffer();
+        index_buffer.first = route_to_host ? shared_memory_->host_buffer()
+                                           : shared_memory_->buffer();
         index_buffer.second = primitive_processing_result.guest_index_base;
         break;
       case PrimitiveProcessor::ProcessedIndexBufferType::kHostConverted:
@@ -4650,23 +4676,14 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
                                       memexport_range.size_bytes);
   }
 
-  // CPU readback for memexport data (if enabled).
-  if (GetGPUSetting(GPUSetting::ReadbackMemexport) &&
-      !memexport_ranges_.empty()) {
-    // Calculate total size of all memexport ranges.
-    uint32_t memexport_total_size = 0;
+  if (route_to_host && !memexport_ranges_.empty()) {
+    // Producer draw: output landed in host_buffer_ (guest RAM), already CPU
+    // coherent, so no readback. Just record the written pages. Consumers then
+    // route to host_buffer_ (geometry) or copy their own range into the device
+    // buffer on demand (texture loads).
     for (const draw_util::MemExportRange& memexport_range : memexport_ranges_) {
-      memexport_total_size += memexport_range.size_bytes;
-    }
-
-    if (memexport_total_size > 0) {
-      if (cvars::readback_memexport_fast) {
-        // Fast mode: use double-buffered readback (delayed sync)
-        IssueDraw_MemexportReadbackFastPath(memexport_total_size);
-      } else {
-        // Full mode: immediate sync (original behavior)
-        IssueDraw_MemexportReadbackFullPath(memexport_total_size);
-      }
+      MarkMemexportPagesWritten(memexport_range.base_address_dwords << 2,
+                                memexport_range.size_bytes);
     }
   }
 
@@ -4695,273 +4712,159 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   return true;
 }
 
-void VulkanCommandProcessor::IssueDraw_MemexportReadbackFullPath(
-    uint32_t memexport_total_size) {
-  // Full mode: immediate sync (original behavior)
-  VkBuffer readback_buffer = RequestReadbackBuffer(memexport_total_size);
-  if (readback_buffer != VK_NULL_HANDLE) {
-    const ui::vulkan::VulkanDevice* const vulkan_device = GetVulkanDevice();
-    const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
-    const VkDevice device = vulkan_device->device();
-
-    VkBuffer shared_memory_buffer = shared_memory_->buffer();
-
-    // Ensure shared memory is ready for transfer and end any active render
-    // pass.
-    shared_memory_->Use(VulkanSharedMemory::Usage::kRead);
-    SubmitBarriers(true);
-
-    InsertDebugMarker("Memexport Readback (sync): %u bytes, %zu ranges",
-                      memexport_total_size, memexport_ranges_.size());
-
-    // Copy each memexport range to the readback buffer.
-    uint32_t readback_buffer_offset = 0;
-    for (const draw_util::MemExportRange& memexport_range : memexport_ranges_) {
-      VkBufferCopy copy_region = {};
-      copy_region.srcOffset = memexport_range.base_address_dwords << 2;
-      copy_region.dstOffset = readback_buffer_offset;
-      copy_region.size = memexport_range.size_bytes;
-
-      deferred_command_buffer_.CmdVkCopyBuffer(
-          shared_memory_buffer, readback_buffer, 1, &copy_region);
-
-      readback_buffer_offset += memexport_range.size_bytes;
-    }
-
-    // Wait for GPU to finish (SYNCHRONIZATION STALL)
-    vk_frame_sync_stats_.memexport_awaits++;
-    if (AwaitAllQueueOperationsCompletion()) {
-      // Map staging buffer and copy to guest memory.
-      void* mapped_data;
-      if (dfn.vkMapMemory(device, memexport_readback_buffer_memory_, 0,
-                          memexport_total_size, 0,
-                          &mapped_data) == VK_SUCCESS) {
-        if (mapped_data) {
-          const uint8_t* readback_bytes =
-              static_cast<const uint8_t*>(mapped_data);
-          for (const draw_util::MemExportRange& memexport_range :
-               memexport_ranges_) {
-            memory::vastcpy(memory_->TranslatePhysical(
-                                memexport_range.base_address_dwords << 2),
-                            const_cast<uint8_t*>(readback_bytes),
-                            memexport_range.size_bytes);
-            readback_bytes += memexport_range.size_bytes;
-          }
-        } else {
-          XELOGE(
-              "VulkanCommandProcessor: Failed to map readback buffer "
-              "(mapped_data is null)");
-        }
-        dfn.vkUnmapMemory(device, memexport_readback_buffer_memory_);
-      } else {
-        XELOGE(
-            "VulkanCommandProcessor: Failed to map readback buffer memory "
-            "for memexport");
-      }
-    } else {
-      XELOGE(
-          "VulkanCommandProcessor: Failed to complete queue operations for "
-          "memexport readback");
-    }
+void VulkanCommandProcessor::EnsureMemexportRangeInDeviceBuffer(
+    uint32_t base_bytes, uint32_t size_bytes) {
+  // The texture cache reads from the device buffer, but memexport output lives
+  // in host_buffer_ (guest RAM). If this range holds memexport output, copy
+  // just it across so the load sees it. Only texture-sampled ranges are copied.
+  if (shared_memory_host_and_edram_descriptor_set_ == VK_NULL_HANDLE ||
+      !size_bytes || base_bytes >= SharedMemory::kBufferSize) {
+    return;
   }
-}
-
-void VulkanCommandProcessor::IssueDraw_MemexportReadbackFastPath(
-    uint32_t memexport_total_size) {
-  // Fast mode: double-buffered readback (similar to resolve readback)
-  // Create a key based on first range address and total size
-  // This should be stable across frames for the same memexport operation
-  if (memexport_ranges_.empty()) {
+  size_bytes = std::min(size_bytes, SharedMemory::kBufferSize - base_bytes);
+  if (!IsMemexportRange(base_bytes, size_bytes)) {
+    return;
+  }
+  VkBuffer host_buffer = shared_memory_->host_buffer();
+  VkBuffer device_buffer = shared_memory_->buffer();
+  if (host_buffer == VK_NULL_HANDLE) {
     return;
   }
 
-  uint64_t memexport_key = MakeReadbackResolveKey(
-      memexport_ranges_[0].base_address_dwords, memexport_total_size);
+  const VkPipelineStageFlags read_stages =
+      VK_PIPELINE_STAGE_VERTEX_INPUT_BIT | guest_shader_pipeline_stages_ |
+      VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT;
+  const VkAccessFlags read_access = VK_ACCESS_INDEX_READ_BIT |
+                                    VK_ACCESS_SHADER_READ_BIT |
+                                    VK_ACCESS_TRANSFER_READ_BIT;
 
+  // Order the memexport writes on host_buffer_ before the transfer read (the
+  // producers may have run several draws ago, so barrier host_buffer_
+  // explicitly rather than relying on Use's last-usage tracking), and prior
+  // device-buffer reads before the transfer write into it.
+  shared_memory_->Use(VulkanSharedMemory::Usage::kRead);
+  PushBufferMemoryBarrier(
+      host_buffer, VkDeviceSize(base_bytes), VkDeviceSize(size_bytes),
+      guest_shader_pipeline_stages_, VK_PIPELINE_STAGE_TRANSFER_BIT,
+      VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT);
+  PushBufferMemoryBarrier(device_buffer, VkDeviceSize(base_bytes),
+                          VkDeviceSize(size_bytes), read_stages,
+                          VK_PIPELINE_STAGE_TRANSFER_BIT, read_access,
+                          VK_ACCESS_TRANSFER_WRITE_BIT);
+  SubmitBarriers(true);
+
+  VkBufferCopy copy_region;
+  copy_region.srcOffset = base_bytes;
+  copy_region.dstOffset = base_bytes;
+  copy_region.size = size_bytes;
+  deferred_command_buffer_.CmdVkCopyBuffer(host_buffer, device_buffer, 1,
+                                           &copy_region);
+
+  // Make the copied data visible to the following texture-load read.
+  PushBufferMemoryBarrier(device_buffer, VkDeviceSize(base_bytes),
+                          VkDeviceSize(size_bytes),
+                          VK_PIPELINE_STAGE_TRANSFER_BIT, read_stages,
+                          VK_ACCESS_TRANSFER_WRITE_BIT, read_access);
+}
+
+bool VulkanCommandProcessor::CreateReadbackSnapshotBuffer(
+    uint32_t size, VkBuffer& buffer_out, VkDeviceMemory& memory_out) {
   const ui::vulkan::VulkanDevice* const vulkan_device = GetVulkanDevice();
   const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
   const VkDevice device = vulkan_device->device();
 
-  ReadbackBuffer& rb = memexport_readback_buffers_[memexport_key];
-  rb.last_used_frame = frame_current_;
+  // Written by the graphics queue, read by the transfer queue. Shared
+  // concurrently so no queue family ownership transfer is needed.
+  const uint32_t snapshot_queue_families[2] = {
+      vulkan_device->queue_family_graphics_compute(),
+      vulkan_device->queue_family_transfer()};
+  VkBufferCreateInfo buffer_info = {};
+  buffer_info.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+  buffer_info.size = size;
+  buffer_info.usage =
+      VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+  buffer_info.sharingMode = VK_SHARING_MODE_CONCURRENT;
+  buffer_info.queueFamilyIndexCount = 2;
+  buffer_info.pQueueFamilyIndices = snapshot_queue_families;
 
-  uint32_t write_index = rb.current_index;
-  uint32_t size = AlignReadbackBufferSize(memexport_total_size);
-
-  // Allocate/resize write buffer if needed
-  if (size > rb.sizes[write_index]) {
-    // Create buffer with TRANSFER_DST usage for copying from GPU.
-    VkBufferCreateInfo buffer_info = {};
-    buffer_info.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-    buffer_info.size = size;
-    buffer_info.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
-    buffer_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-
-    VkBuffer new_buffer;
-    if (dfn.vkCreateBuffer(device, &buffer_info, nullptr, &new_buffer) !=
-        VK_SUCCESS) {
-      XELOGE(
-          "VulkanCommandProcessor: Failed to create memexport readback buffer "
-          "of {} MB",
-          size >> 20);
-      return;
-    }
-
-    // Get memory requirements.
-    VkMemoryRequirements memory_requirements;
-    dfn.vkGetBufferMemoryRequirements(device, new_buffer, &memory_requirements);
-
-    // Allocate HOST_VISIBLE | HOST_CACHED | HOST_COHERENT memory for readback.
-    const uint32_t memory_type_index = ui::vulkan::util::ChooseMemoryType(
-        vulkan_device->memory_types(), memory_requirements.memoryTypeBits,
-        ui::vulkan::util::MemoryPurpose::kReadback);
-
-    if (memory_type_index == UINT32_MAX) {
-      XELOGE(
-          "VulkanCommandProcessor: Failed to find memory type for memexport "
-          "readback buffer");
-      dfn.vkDestroyBuffer(device, new_buffer, nullptr);
-      return;
-    }
-
-    VkMemoryAllocateInfo memory_info = {};
-    memory_info.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-    memory_info.allocationSize = memory_requirements.size;
-    memory_info.memoryTypeIndex = memory_type_index;
-
-    VkDeviceMemory new_memory;
-    if (dfn.vkAllocateMemory(device, &memory_info, nullptr, &new_memory) !=
-        VK_SUCCESS) {
-      XELOGE(
-          "VulkanCommandProcessor: Failed to allocate memexport readback "
-          "buffer memory");
-      dfn.vkDestroyBuffer(device, new_buffer, nullptr);
-      return;
-    }
-
-    // Bind memory to buffer.
-    if (dfn.vkBindBufferMemory(device, new_buffer, new_memory, 0) !=
-        VK_SUCCESS) {
-      XELOGE(
-          "VulkanCommandProcessor: Failed to bind memexport readback buffer "
-          "memory");
-      dfn.vkFreeMemory(device, new_memory, nullptr);
-      dfn.vkDestroyBuffer(device, new_buffer, nullptr);
-      return;
-    }
-
-    // Clean up old buffer if exists
-    // Must wait for GPU to finish using the buffer before destroying it
-    if (rb.buffers[write_index] != VK_NULL_HANDLE) {
-      if (!AwaitAllQueueOperationsCompletion()) {
-        XELOGE(
-            "VulkanCommandProcessor: Failed to wait for GPU before "
-            "destroying old memexport readback buffer");
-        dfn.vkDestroyBuffer(device, new_buffer, nullptr);
-        dfn.vkFreeMemory(device, new_memory, nullptr);
-        return;
-      }
-    }
-    if (rb.mapped_data[write_index] != nullptr) {
-      dfn.vkUnmapMemory(device, rb.memories[write_index]);
-      rb.mapped_data[write_index] = nullptr;
-    }
-    if (rb.buffers[write_index] != VK_NULL_HANDLE) {
-      dfn.vkDestroyBuffer(device, rb.buffers[write_index], nullptr);
-    }
-    if (rb.memories[write_index] != VK_NULL_HANDLE) {
-      dfn.vkFreeMemory(device, rb.memories[write_index], nullptr);
-    }
-
-    rb.buffers[write_index] = new_buffer;
-    rb.memories[write_index] = new_memory;
-    rb.sizes[write_index] = size;
-
-    // Map the new buffer persistently
-    if (dfn.vkMapMemory(device, new_memory, 0, size, 0,
-                        &rb.mapped_data[write_index]) != VK_SUCCESS) {
-      XELOGE(
-          "VulkanCommandProcessor: Failed to persistently map memexport "
-          "readback buffer");
-      rb.mapped_data[write_index] = nullptr;
-    }
+  VkBuffer new_buffer;
+  if (dfn.vkCreateBuffer(device, &buffer_info, nullptr, &new_buffer) !=
+      VK_SUCCESS) {
+    XELOGE("VulkanCommandProcessor: Failed to create {} MB readback snapshot",
+           size >> 20);
+    return false;
   }
 
-  VkBuffer shared_memory_buffer = shared_memory_->buffer();
-
-  // Ensure shared memory is ready for transfer and end any active render pass.
-  shared_memory_->Use(VulkanSharedMemory::Usage::kRead);
-  // Sync against any prior write to this readback buffer (across submissions
-  // or earlier in the frame). The host read at `read_index` (other slot) is
-  // unaffected.
-  PushBufferMemoryBarrier(
-      rb.buffers[write_index], 0, VK_WHOLE_SIZE, VK_PIPELINE_STAGE_TRANSFER_BIT,
-      VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
-      VK_ACCESS_TRANSFER_WRITE_BIT, VK_QUEUE_FAMILY_IGNORED,
-      VK_QUEUE_FAMILY_IGNORED, false);
-  SubmitBarriers(true);
-
-  InsertDebugMarker("Memexport Readback (async): %u bytes, %zu ranges",
-                    memexport_total_size, memexport_ranges_.size());
-
-  // Copy exported data to current frame's buffer
-  uint32_t readback_buffer_offset = 0;
-  for (const draw_util::MemExportRange& memexport_range : memexport_ranges_) {
-    VkBufferCopy copy_region = {};
-    copy_region.srcOffset = memexport_range.base_address_dwords << 2;
-    copy_region.dstOffset = readback_buffer_offset;
-    copy_region.size = memexport_range.size_bytes;
-
-    deferred_command_buffer_.CmdVkCopyBuffer(
-        shared_memory_buffer, rb.buffers[write_index], 1, &copy_region);
-
-    readback_buffer_offset += memexport_range.size_bytes;
+  VkMemoryRequirements memory_requirements;
+  dfn.vkGetBufferMemoryRequirements(device, new_buffer, &memory_requirements);
+  const uint32_t memory_type_index = ui::vulkan::util::ChooseMemoryType(
+      vulkan_device->memory_types(), memory_requirements.memoryTypeBits,
+      ui::vulkan::util::MemoryPurpose::kDeviceLocal);
+  if (memory_type_index == UINT32_MAX) {
+    XELOGE(
+        "VulkanCommandProcessor: Failed to find memory type for readback "
+        "snapshot");
+    dfn.vkDestroyBuffer(device, new_buffer, nullptr);
+    return false;
   }
 
-  // Use delayed sync (read from previous frame's buffer)
-  uint32_t read_index = 1 - write_index;
+  VkMemoryAllocateInfo memory_info = {};
+  memory_info.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+  memory_info.allocationSize = memory_requirements.size;
+  memory_info.memoryTypeIndex = memory_type_index;
+  VkDeviceMemory new_memory;
+  if (dfn.vkAllocateMemory(device, &memory_info, nullptr, &new_memory) !=
+      VK_SUCCESS) {
+    XELOGE(
+        "VulkanCommandProcessor: Failed to allocate readback snapshot memory");
+    dfn.vkDestroyBuffer(device, new_buffer, nullptr);
+    return false;
+  }
+  if (dfn.vkBindBufferMemory(device, new_buffer, new_memory, 0) != VK_SUCCESS) {
+    XELOGE("VulkanCommandProcessor: Failed to bind readback snapshot memory");
+    dfn.vkFreeMemory(device, new_memory, nullptr);
+    dfn.vkDestroyBuffer(device, new_buffer, nullptr);
+    return false;
+  }
 
-  bool is_cache_miss = false;
-  // If previous buffer doesn't exist or is too small, fall back to sync
-  // This happens on first use or buffer resize - subsequent frames will be fast
-  if (rb.buffers[read_index] == VK_NULL_HANDLE ||
-      memexport_total_size > rb.sizes[read_index]) {
-    is_cache_miss = true;
-    read_index = write_index;
-    if (!AwaitAllQueueOperationsCompletion()) {
-      return;
+  buffer_out = new_buffer;
+  memory_out = new_memory;
+  return true;
+}
+
+void VulkanCommandProcessor::DestroyReadbackBuffer(ReadbackBuffer& rb) {
+  const ui::vulkan::VulkanDevice* const vulkan_device = GetVulkanDevice();
+  const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
+  const VkDevice device = vulkan_device->device();
+  for (int i = 0; i < 2; i++) {
+    if (rb.mapped_data[i] != nullptr) {
+      dfn.vkUnmapMemory(device, rb.memories[i]);
+      rb.mapped_data[i] = nullptr;
     }
+    ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyBuffer, device,
+                                           rb.buffers[i]);
+    ui::vulkan::util::DestroyAndNullHandle(dfn.vkFreeMemory, device,
+                                           rb.memories[i]);
+    ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyBuffer, device,
+                                           rb.snapshot_buffers[i]);
+    ui::vulkan::util::DestroyAndNullHandle(dfn.vkFreeMemory, device,
+                                           rb.snapshot_memories[i]);
   }
+}
 
-  // TODO(has207): figure out why not copying only on cache hit
-  // doesn't work on vulkan but works in d3d12.
-  // DISABLED:// Only copy on cache miss (when we have fresh data from GPU sync)
-  // DISABLED:// On cache hit, we'd be copying stale data from previous frame
-  // DISABLED://if (is_cache_miss && rb.buffers[read_index] != VK_NULL_HANDLE &&
-  if (rb.buffers[read_index] != VK_NULL_HANDLE &&
-      memexport_total_size <= rb.sizes[read_index] &&
-      rb.mapped_data[read_index] != nullptr) {
-    const uint8_t* readback_bytes =
-        static_cast<const uint8_t*>(rb.mapped_data[read_index]);
-    for (const draw_util::MemExportRange& memexport_range : memexport_ranges_) {
-      uint8_t* dest_ptr =
-          memory_->TranslatePhysical(memexport_range.base_address_dwords << 2);
-      // vastcpy requires 64-byte alignment for non-temporal stores.
-      // If addresses aren't aligned, fall back to memcpy.
-      if ((reinterpret_cast<uintptr_t>(dest_ptr) & 63) == 0 &&
-          (reinterpret_cast<uintptr_t>(readback_bytes) & 63) == 0) {
-        memory::vastcpy(dest_ptr, const_cast<uint8_t*>(readback_bytes),
-                        memexport_range.size_bytes);
-      } else {
-        std::memcpy(dest_ptr, readback_bytes, memexport_range.size_bytes);
-      }
-      readback_bytes += memexport_range.size_bytes;
-    }
+void VulkanCommandProcessor::CopyReadbackBufferToGuest(
+    const ReadbackBuffer& rb, uint32_t index, uint32_t written_address,
+    uint32_t written_length) {
+  if (rb.mapped_data[index] == nullptr) {
+    return;
   }
-
-  // Swap buffer index for next time this specific memexport address is used
-  // This way next time we write to the other buffer and read from this one
-  rb.current_index = 1 - rb.current_index;
+  // Make the GPU copy visible to the CPU on non-coherent readback memory.
+  ui::vulkan::util::InvalidateMappedMemoryRange(
+      GetVulkanDevice(), rb.memories[index], rb.memory_type_indices[index], 0,
+      rb.sizes[index], written_length);
+  uint8_t* dest_ptr = memory_->TranslatePhysical(written_address);
+  memory::vastcpy(dest_ptr, static_cast<uint8_t*>(rb.mapped_data[index]),
+                  written_length);
 }
 
 void VulkanCommandProcessor::EvictOldReadbackBuffers(
@@ -4970,25 +4873,10 @@ void VulkanCommandProcessor::EvictOldReadbackBuffers(
     return;
   }
 
-  const ui::vulkan::VulkanDevice* const vulkan_device = GetVulkanDevice();
-  const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
-  const VkDevice device = vulkan_device->device();
-
   for (auto it = buffer_map.begin(); it != buffer_map.end();) {
     if (it->second.last_used_frame <
         frame_current_ - kReadbackBufferEvictionAgeFrames) {
-      // Unmap and release both buffers
-      for (int i = 0; i < 2; i++) {
-        if (it->second.mapped_data[i] != nullptr) {
-          dfn.vkUnmapMemory(device, it->second.memories[i]);
-        }
-        if (it->second.buffers[i] != VK_NULL_HANDLE) {
-          dfn.vkDestroyBuffer(device, it->second.buffers[i], nullptr);
-        }
-        if (it->second.memories[i] != VK_NULL_HANDLE) {
-          dfn.vkFreeMemory(device, it->second.memories[i], nullptr);
-        }
-      }
+      DestroyReadbackBuffer(it->second);
       it = buffer_map.erase(it);
     } else {
       ++it;
@@ -5067,15 +4955,15 @@ bool VulkanCommandProcessor::SubmitReadbackCopiesToTransferQueue(
     return false;
   }
 
-  VkBuffer shared_memory_buffer = shared_memory_->buffer();
   for (const PendingReadbackCopy& copy : pending_readback_copies_) {
     VkBufferCopy region = {};
-    region.srcOffset = copy.src_offset;
+    region.srcOffset = 0;
     region.dstOffset = 0;
     region.size = copy.size;
-    dfn.vkCmdCopyBuffer(command_buffer.buffer, shared_memory_buffer,
-                        copy.readback_buffer->buffers[copy.buffer_index], 1,
-                        &region);
+    dfn.vkCmdCopyBuffer(
+        command_buffer.buffer,
+        copy.readback_buffer->snapshot_buffers[copy.buffer_index],
+        copy.readback_buffer->buffers[copy.buffer_index], 1, &region);
   }
 
   if (dfn.vkEndCommandBuffer(command_buffer.buffer) != VK_SUCCESS) {
@@ -5083,9 +4971,9 @@ bool VulkanCommandProcessor::SubmitReadbackCopiesToTransferQueue(
     return false;
   }
 
-  // Wait for the graphics submission that wrote the resolved data into shared
-  // memory (the semaphore also makes those writes visible to the transfer
-  // queue). Shared memory is created with concurrent sharing for this.
+  // Wait for the graphics submission that wrote the resolved data into the
+  // snapshots (the semaphore also makes those writes visible to the transfer
+  // queue). Snapshots are created with concurrent sharing for this.
   VkPipelineStageFlags wait_stage_mask = VK_PIPELINE_STAGE_TRANSFER_BIT;
   VkSubmitInfo submit_info = {VK_STRUCTURE_TYPE_SUBMIT_INFO};
   submit_info.waitSemaphoreCount = 1;
@@ -5108,6 +4996,12 @@ bool VulkanCommandProcessor::SubmitReadbackCopiesToTransferQueue(
   transfer_command_buffers_writable_.pop_back();
   transfer_wait_semaphores_in_flight_.emplace_back(transfer_submission,
                                                    graphics_signal_semaphore);
+  // Stamp the submission onto each filled slot so the CPU read of the buffer
+  // and the graphics reuse of the snapshot can wait for this copy to complete.
+  for (const PendingReadbackCopy& copy : pending_readback_copies_) {
+    copy.readback_buffer->transfer_submission[copy.buffer_index] =
+        transfer_submission;
+  }
   pending_readback_copies_.clear();
   return true;
 }
@@ -5168,6 +5062,10 @@ bool VulkanCommandProcessor::IssueCopy() {
   }
   ++submission_in_progress_.resolve_count;
   ++vk_frame_sync_stats_.resolves;
+
+  // The resolve wrote the device buffer. Drop any stale memexport marks so the
+  // output isn't overwritten with guest RAM by a later texture load.
+  ClearMemexportPages(written_address, written_length);
 
   // CPU readback resolve path (if not disabled).
   ReadbackResolveMode readback_mode = GetReadbackResolveMode();
@@ -5385,6 +5283,7 @@ bool VulkanCommandProcessor::IssueCopy() {
       rb.buffers[write_index] = new_buffer;
       rb.memories[write_index] = new_memory;
       rb.sizes[write_index] = size;
+      rb.memory_type_indices[write_index] = memory_type_index;
 
       // Map the new buffer persistently
       if (dfn.vkMapMemory(device, new_memory, 0, size, 0,
@@ -5398,27 +5297,12 @@ bool VulkanCommandProcessor::IssueCopy() {
 
     if (use_transfer_queue) {
       uint32_t read_index = 1 - write_index;
-      bool read_available = rb.buffers[read_index] != VK_NULL_HANDLE &&
-                            written_length <= rb.sizes[read_index] &&
-                            rb.mapped_data[read_index] != nullptr;
-      if (read_available) {
-        // "some" only reads on a cache miss, so a cache hit does nothing.
-        if (readback_mode != ReadbackResolveMode::kSome) {
-          // "fast" defers the copy to the transfer queue and reads last frame's
-          // buffer without waiting. A later resolve may overwrite shared memory
-          // while the copy reads it. Accepted as the documented approximate
-          // tradeoff for fast/some (full stays synchronous on graphics).
-          pending_readback_copies_.push_back(
-              {&rb, write_index, written_address, written_length});
-          uint8_t* dest_ptr = memory_->TranslatePhysical(written_address);
-          memory::vastcpy(dest_ptr,
-                          static_cast<uint8_t*>(rb.mapped_data[read_index]),
-                          written_length);
-        }
-      } else {
-        // No previous buffer yet (first use or resize). Copy and read
-        // synchronously on the graphics queue so on-demand readback
-        // (screenshots) still gets data this frame.
+
+      // Synchronous fallback on the graphics queue: copy this resolve straight
+      // to the host buffer and read it back this frame. Used on first use,
+      // resize, or if the snapshot can't be allocated. Returns false if the GPU
+      // wait failed.
+      auto sync_current_readback = [&]() -> bool {
         VkBuffer shared_memory_buffer = shared_memory_->buffer();
         shared_memory_->Use(VulkanSharedMemory::Usage::kRead);
         PushBufferMemoryBarrier(
@@ -5440,14 +5324,90 @@ bool VulkanCommandProcessor::IssueCopy() {
           XELOGE(
               "VulkanCommandProcessor: Failed to complete queue operations for "
               "resolve readback fallback");
+          return false;
+        }
+        CopyReadbackBufferToGuest(rb, write_index, written_address,
+                                  written_length);
+        return true;
+      };
+
+      bool read_available = rb.buffers[read_index] != VK_NULL_HANDLE &&
+                            written_length <= rb.sizes[read_index] &&
+                            rb.mapped_data[read_index] != nullptr;
+
+      if (!read_available) {
+        // No previous buffer yet (first use or resize). Read this frame's data
+        // synchronously so on-demand readback (screenshots) still gets data.
+        if (!sync_current_readback()) {
           PopDebugMarker();
           return true;
         }
-        if (rb.mapped_data[write_index] != nullptr) {
-          uint8_t* dest_ptr = memory_->TranslatePhysical(written_address);
-          memory::vastcpy(dest_ptr,
-                          static_cast<uint8_t*>(rb.mapped_data[write_index]),
-                          written_length);
+      } else if (readback_mode != ReadbackResolveMode::kSome) {
+        // "fast": snapshot the resolved region on the graphics queue, hand the
+        // device->host copy to the transfer queue, and read last frame's
+        // finished buffer. "some" on a cache hit does nothing.
+
+        // The snapshot slot is reused every other resolve. Wait for the prior
+        // transfer copy that read it before the graphics queue overwrites it.
+        if (rb.transfer_submission[write_index]) {
+          transfer_completion_timeline_.AwaitSubmissionAndUpdateCompleted(
+              rb.transfer_submission[write_index]);
+          rb.transfer_submission[write_index] = 0;
+        }
+
+        // Ensure the device-local snapshot for this slot exists and is big
+        // enough.
+        bool snapshot_ready =
+            rb.snapshot_buffers[write_index] != VK_NULL_HANDLE &&
+            size <= rb.snapshot_sizes[write_index];
+        if (!snapshot_ready) {
+          if (rb.snapshot_buffers[write_index] != VK_NULL_HANDLE) {
+            dfn.vkDestroyBuffer(device, rb.snapshot_buffers[write_index],
+                                nullptr);
+            dfn.vkFreeMemory(device, rb.snapshot_memories[write_index],
+                             nullptr);
+            rb.snapshot_buffers[write_index] = VK_NULL_HANDLE;
+            rb.snapshot_memories[write_index] = VK_NULL_HANDLE;
+            rb.snapshot_sizes[write_index] = 0;
+          }
+          if (CreateReadbackSnapshotBuffer(size,
+                                           rb.snapshot_buffers[write_index],
+                                           rb.snapshot_memories[write_index])) {
+            rb.snapshot_sizes[write_index] = size;
+            snapshot_ready = true;
+          }
+        }
+
+        if (snapshot_ready) {
+          // Graphics queue: snapshot the resolved region. Same-queue ordering
+          // puts it after the resolve and before the next resolve overwrites
+          // shared memory, so the transfer copy reads stable data.
+          shared_memory_->Use(VulkanSharedMemory::Usage::kRead);
+          InsertDebugMarker("Resolve Readback (snapshot): 0x%08X, %u bytes",
+                            written_address, written_length);
+          VkBufferCopy copy_region = {};
+          copy_region.srcOffset = written_address;
+          copy_region.dstOffset = 0;
+          copy_region.size = written_length;
+          deferred_command_buffer_.CmdVkCopyBuffer(
+              shared_memory_->buffer(), rb.snapshot_buffers[write_index], 1,
+              &copy_region);
+          // Defer the device->host copy (snapshot -> host buffer) to the DMA
+          // queue.
+          pending_readback_copies_.push_back(
+              {&rb, write_index, written_length});
+          // Read last frame's data, waiting for the transfer copy that filled
+          // it so the CPU never reads an in-flight copy.
+          if (rb.transfer_submission[read_index]) {
+            transfer_completion_timeline_.AwaitSubmissionAndUpdateCompleted(
+                rb.transfer_submission[read_index]);
+          }
+          CopyReadbackBufferToGuest(rb, read_index, written_address,
+                                    written_length);
+        } else if (!sync_current_readback()) {
+          // Snapshot allocation failed. Fall back to a synchronous read.
+          PopDebugMarker();
+          return true;
         }
       }
     } else {
@@ -5512,12 +5472,9 @@ bool VulkanCommandProcessor::IssueCopy() {
       bool should_copy =
           (readback_mode == ReadbackResolveMode::kSome) ? is_cache_miss : true;
       if (should_copy && rb.buffers[read_index] != VK_NULL_HANDLE &&
-          written_length <= rb.sizes[read_index] &&
-          rb.mapped_data[read_index] != nullptr) {
-        uint8_t* dest_ptr = memory_->TranslatePhysical(written_address);
-        memory::vastcpy(dest_ptr,
-                        static_cast<uint8_t*>(rb.mapped_data[read_index]),
-                        written_length);
+          written_length <= rb.sizes[read_index]) {
+        CopyReadbackBufferToGuest(rb, read_index, written_address,
+                                  written_length);
       }
     }
 
@@ -5716,6 +5673,7 @@ bool VulkanCommandProcessor::IssueCopy() {
       rb.buffers[write_index] = new_buffer;
       rb.memories[write_index] = new_memory;
       rb.sizes[write_index] = size;
+      rb.memory_type_indices[write_index] = memory_type_index;
 
       // Map the new buffer persistently
       if (dfn.vkMapMemory(device, new_memory, 0, size, 0,
@@ -6043,13 +6001,10 @@ bool VulkanCommandProcessor::IssueCopy() {
     bool should_copy =
         (readback_mode == ReadbackResolveMode::kSome) ? is_cache_miss : true;
 
-    // Simple memcpy - data is already downscaled by GPU
-    if (should_copy && rb.mapped_data[read_index] != nullptr &&
-        written_length <= rb.sizes[read_index]) {
-      uint8_t* physaddr = memory_->TranslatePhysical(written_address);
-      memory::vastcpy(physaddr,
-                      static_cast<uint8_t*>(rb.mapped_data[read_index]),
-                      written_length);
+    // Data is already downscaled by the GPU.
+    if (should_copy && written_length <= rb.sizes[read_index]) {
+      CopyReadbackBufferToGuest(rb, read_index, written_address,
+                                written_length);
     }
 
     // Swap buffer index for next time
@@ -6062,89 +6017,6 @@ bool VulkanCommandProcessor::IssueCopy() {
   }
 
   return true;
-}
-
-VkBuffer VulkanCommandProcessor::RequestReadbackBuffer(uint32_t size) {
-  if (size == 0) {
-    return VK_NULL_HANDLE;
-  }
-
-  size = AlignReadbackBufferSize(size);
-
-  if (size > memexport_readback_buffer_size_) {
-    const ui::vulkan::VulkanDevice* const vulkan_device = GetVulkanDevice();
-    const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
-    const VkDevice device = vulkan_device->device();
-
-    // Create buffer with TRANSFER_DST usage for copying from GPU.
-    VkBufferCreateInfo buffer_info = {};
-    buffer_info.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-    buffer_info.size = size;
-    buffer_info.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
-    buffer_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-
-    VkBuffer new_buffer;
-    if (dfn.vkCreateBuffer(device, &buffer_info, nullptr, &new_buffer) !=
-        VK_SUCCESS) {
-      XELOGE(
-          "VulkanCommandProcessor: Failed to create readback buffer of {} MB",
-          size >> 20);
-      return VK_NULL_HANDLE;
-    }
-
-    // Get memory requirements.
-    VkMemoryRequirements memory_requirements;
-    dfn.vkGetBufferMemoryRequirements(device, new_buffer, &memory_requirements);
-
-    // Allocate HOST_VISIBLE | HOST_CACHED | HOST_COHERENT memory for readback.
-    const uint32_t memory_type_index = ui::vulkan::util::ChooseMemoryType(
-        vulkan_device->memory_types(), memory_requirements.memoryTypeBits,
-        ui::vulkan::util::MemoryPurpose::kReadback);
-    if (memory_type_index == UINT32_MAX) {
-      XELOGE(
-          "VulkanCommandProcessor: Failed to find suitable memory type for "
-          "readback buffer");
-      dfn.vkDestroyBuffer(device, new_buffer, nullptr);
-      return VK_NULL_HANDLE;
-    }
-
-    VkMemoryAllocateInfo alloc_info = {};
-    alloc_info.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-    alloc_info.allocationSize = memory_requirements.size;
-    alloc_info.memoryTypeIndex = memory_type_index;
-
-    VkDeviceMemory new_memory;
-    if (dfn.vkAllocateMemory(device, &alloc_info, nullptr, &new_memory) !=
-        VK_SUCCESS) {
-      XELOGE(
-          "VulkanCommandProcessor: Failed to allocate memory for readback "
-          "buffer");
-      dfn.vkDestroyBuffer(device, new_buffer, nullptr);
-      return VK_NULL_HANDLE;
-    }
-
-    // Bind memory to buffer.
-    if (dfn.vkBindBufferMemory(device, new_buffer, new_memory, 0) !=
-        VK_SUCCESS) {
-      XELOGE(
-          "VulkanCommandProcessor: Failed to bind memory to readback buffer");
-      dfn.vkFreeMemory(device, new_memory, nullptr);
-      dfn.vkDestroyBuffer(device, new_buffer, nullptr);
-      return VK_NULL_HANDLE;
-    }
-
-    // Destroy old buffer if it exists.
-    if (memexport_readback_buffer_ != VK_NULL_HANDLE) {
-      dfn.vkDestroyBuffer(device, memexport_readback_buffer_, nullptr);
-      dfn.vkFreeMemory(device, memexport_readback_buffer_memory_, nullptr);
-    }
-
-    memexport_readback_buffer_ = new_buffer;
-    memexport_readback_buffer_memory_ = new_memory;
-    memexport_readback_buffer_size_ = size;
-  }
-
-  return memexport_readback_buffer_;
 }
 
 void VulkanCommandProcessor::EnsureZPDQueryResources() {
@@ -6178,26 +6050,38 @@ void VulkanCommandProcessor::EnsureZPDQueryResources() {
       fsi_counter_descriptor_buffer_info.offset = 0;
       fsi_counter_descriptor_buffer_info.range = fsi_counter_range;
 
-      VkWriteDescriptorSet fsi_counter_descriptor_write;
-      fsi_counter_descriptor_write.sType =
-          VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-      fsi_counter_descriptor_write.pNext = nullptr;
-      fsi_counter_descriptor_write.dstSet =
-          shared_memory_and_edram_descriptor_set_;
-      fsi_counter_descriptor_write.dstBinding = 2;
-      fsi_counter_descriptor_write.dstArrayElement = 0;
-      fsi_counter_descriptor_write.descriptorCount = 1;
-      fsi_counter_descriptor_write.descriptorType =
-          VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-      fsi_counter_descriptor_write.pImageInfo = nullptr;
-      fsi_counter_descriptor_write.pBufferInfo =
-          &fsi_counter_descriptor_buffer_info;
-      fsi_counter_descriptor_write.pTexelBufferView = nullptr;
+      // Mirror binding 2 to the host-imported routing set too, so a routed FSI
+      // draw reads the same counter.
+      VkWriteDescriptorSet fsi_counter_descriptor_writes[2];
+      uint32_t fsi_counter_descriptor_write_count = 0;
+      for (VkDescriptorSet set :
+           {shared_memory_and_edram_descriptor_set_,
+            shared_memory_host_and_edram_descriptor_set_}) {
+        if (set == VK_NULL_HANDLE) {
+          continue;
+        }
+        VkWriteDescriptorSet& fsi_counter_descriptor_write =
+            fsi_counter_descriptor_writes[fsi_counter_descriptor_write_count++];
+        fsi_counter_descriptor_write.sType =
+            VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        fsi_counter_descriptor_write.pNext = nullptr;
+        fsi_counter_descriptor_write.dstSet = set;
+        fsi_counter_descriptor_write.dstBinding = 2;
+        fsi_counter_descriptor_write.dstArrayElement = 0;
+        fsi_counter_descriptor_write.descriptorCount = 1;
+        fsi_counter_descriptor_write.descriptorType =
+            VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        fsi_counter_descriptor_write.pImageInfo = nullptr;
+        fsi_counter_descriptor_write.pBufferInfo =
+            &fsi_counter_descriptor_buffer_info;
+        fsi_counter_descriptor_write.pTexelBufferView = nullptr;
+      }
 
       const ui::vulkan::VulkanDevice::Functions& dfn =
           GetVulkanDevice()->functions();
-      dfn.vkUpdateDescriptorSets(GetVulkanDevice()->device(), 1,
-                                 &fsi_counter_descriptor_write, 0, nullptr);
+      dfn.vkUpdateDescriptorSets(GetVulkanDevice()->device(),
+                                 fsi_counter_descriptor_write_count,
+                                 fsi_counter_descriptor_writes, 0, nullptr);
 
       zpd_fsi_counter_descriptor_buffer_ = fsi_counter_buffer;
       zpd_fsi_counter_descriptor_range_ = fsi_counter_range;
@@ -7442,7 +7326,6 @@ bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
 
     // Evict old readback buffers once per frame
     EvictOldReadbackBuffers(readback_buffers_);
-    EvictOldReadbackBuffers(memexport_readback_buffers_);
 
     if (cache_clear_requested_ && AwaitAllQueueOperationsCompletion()) {
       cache_clear_requested_ = false;

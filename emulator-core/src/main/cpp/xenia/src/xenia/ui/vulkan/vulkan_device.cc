@@ -254,6 +254,11 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
     if (get_physical_device_properties2_supported) {
       XE_UI_VULKAN_STRUCT_EXTENSION(EXT_device_fault)
     }
+    // #179. Import guest RAM as device memory for a zero-copy shared-memory
+    // buffer that aliases guest RAM.
+    if (get_physical_device_properties2_supported) {
+      XE_UI_VULKAN_STRUCT_EXTENSION(EXT_external_memory_host)
+    }
   }
 
 #undef XE_UI_VULKAN_STRUCT_EXTENSION
@@ -403,6 +408,11 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
   VkPhysicalDeviceExtendedDynamicState3PropertiesEXT
       properties_EXT_extended_dynamic_state3 = {
           VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE_3_PROPERTIES_EXT};
+  // VK_EXT_external_memory_host (#179) properties (host pointer import
+  // alignment).
+  VkPhysicalDeviceExternalMemoryHostPropertiesEXT
+      properties_EXT_external_memory_host = {
+          VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_MEMORY_HOST_PROPERTIES_EXT};
 
   if (get_physical_device_properties2_supported) {
     if (properties.apiVersion >= VK_MAKE_API_VERSION(0, 1, 1, 0)) {
@@ -490,6 +500,10 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
                                                 device_create_info);
       properties_EXT_extended_dynamic_state3.pNext = properties_2.pNext;
       properties_2.pNext = &properties_EXT_extended_dynamic_state3;
+    }
+    if (device->extensions_.ext_EXT_external_memory_host) {
+      properties_EXT_external_memory_host.pNext = properties_2.pNext;
+      properties_2.pNext = &properties_EXT_external_memory_host;
     }
     ifn.vkGetPhysicalDeviceProperties2(physical_device, &properties_2);
     ifn.vkGetPhysicalDeviceFeatures2(physical_device, &supported_features_2);
@@ -984,6 +998,12 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
   device->extensions_.ext_1_3_EXT_subgroup_size_control =
       ext_1_3_EXT_subgroup_size_control;
 
+  // VK_EXT_external_memory_host (#179).
+  if (device->extensions_.ext_EXT_external_memory_host) {
+    XE_UI_VULKAN_PROPERTY_2(properties_EXT_external_memory_host,
+                            minImportedHostPointerAlignment);
+  }
+
   // VK_KHR_fragment_shader_barycentric (#322) /
   // VK_NV_fragment_shader_barycentric (#203).
   // MoltenVK advertises this, but SPIRV-Cross can't translate Xenia's
@@ -1166,6 +1186,16 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
         ifn.vkGetDeviceProcAddr(device->device_, "vkGetDeviceFaultInfoEXT"));
     if (!device->vkGetDeviceFaultInfoEXT_) {
       device->extensions_.ext_EXT_device_fault = false;
+    }
+  }
+
+  // Optional host-pointer import function - failing to load disables zero-copy.
+  if (device->extensions_.ext_EXT_external_memory_host) {
+    device->vkGetMemoryHostPointerPropertiesEXT_ =
+        PFN_vkGetMemoryHostPointerPropertiesEXT(ifn.vkGetDeviceProcAddr(
+            device->device_, "vkGetMemoryHostPointerPropertiesEXT"));
+    if (!device->vkGetMemoryHostPointerPropertiesEXT_) {
+      device->extensions_.ext_EXT_external_memory_host = false;
     }
   }
 

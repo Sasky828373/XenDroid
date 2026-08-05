@@ -60,7 +60,6 @@ DECLARE_bool(clear_memory_page_state);
 
 DECLARE_string(readback_resolve);
 
-DECLARE_bool(readback_memexport);
 
 DEFINE_bool(fullscreen, false, "Whether to launch the emulator in fullscreen.",
             "Display");
@@ -1541,9 +1540,6 @@ void EmulatorWindow::ToggleGPUSetting(gpu::GPUSetting setting) {
     case GPUSetting::ClearMemoryPageState:
       SaveGPUSetting(GPUSetting::ClearMemoryPageState,
                      !cvars::clear_memory_page_state);
-      break;
-    case GPUSetting::ReadbackMemexport:
-      SaveGPUSetting(GPUSetting::ReadbackMemexport, !cvars::readback_memexport);
       break;
   }
 }

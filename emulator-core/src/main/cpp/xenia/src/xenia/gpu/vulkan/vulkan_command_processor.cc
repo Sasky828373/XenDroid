@@ -3857,6 +3857,10 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   // updates done previously must be performed again because the updates done
   // before the awaiting may be referencing objects destroyed by
   // CompletedSubmissionUpdated.
+  // One readiness snapshot per draw, taken where the sampler collection reads
+  // it. Re-reading bindings_ready() later would claim binding counts for a
+  // stage whose sampler vector was collected as empty.
+  bool stage_bindings_ready[2] = {false, false};
   for (uint32_t i = 0; i < 2; ++i) {
     if (!BeginSubmission(true)) {
       return false;
@@ -4008,7 +4012,10 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
       // Don't read a shader's sampler bindings while a creation thread is still
       // populating them (async draws don't translate here). A placeholder draw
       // that ends up using this shader binds no samplers for it anyway.
-      if (!shader->bindings_ready()) {
+      if (!i) {
+        stage_bindings_ready[j] = shader->bindings_ready();
+      }
+      if (!stage_bindings_ready[j]) {
         if (!i) {
           shader_samplers.clear();
         }
@@ -4217,13 +4224,12 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   // Update the textures before most other work in the submission because
   // samplers depend on this (and in case of sampler overflow in a submission,
   // submissions must be split) - may perform dispatches and copying.
-  // Only read after-translation state for shaders whose bindings are ready (not
-  // being populated by a creation thread for an async draw).
+  // Only read after-translation state for stages ready at the draw's snapshot.
   uint32_t used_texture_mask =
-      (vertex_shader->bindings_ready()
+      (stage_bindings_ready[0]
            ? vertex_shader->GetUsedTextureMaskAfterTranslation()
            : 0) |
-      (pixel_shader != nullptr && pixel_shader->bindings_ready()
+      (pixel_shader != nullptr && stage_bindings_ready[1]
            ? pixel_shader->GetUsedTextureMaskAfterTranslation()
            : 0);
   texture_cache_->RequestTextures(used_texture_mask);
@@ -4420,7 +4426,8 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
 
   // Update uniform buffers and descriptor sets after binding the pipeline with
   // the new layout.
-  if (!UpdateBindings(vertex_shader, pixel_shader, interpreter_placeholder,
+  if (!UpdateBindings(vertex_shader, pixel_shader, stage_bindings_ready[0],
+                      stage_bindings_ready[1], interpreter_placeholder,
                       placeholder_pixel_shader)) {
     return false;
   }
@@ -4583,7 +4590,9 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
                        normalized_depth_control, draw_resolution_scale_x,
                        draw_resolution_scale_y, apply_host_depth_polygon_offset,
                        pipeline->dynamic_state);
-    if (!UpdateBindings(vertex_shader, pixel_shader)) {
+    if (!UpdateBindings(vertex_shader, pixel_shader, stage_bindings_ready[0],
+                        stage_bindings_ready[1], interpreter_placeholder,
+                        placeholder_pixel_shader)) {
       return false;
     }
   }
@@ -8361,6 +8370,8 @@ void VulkanCommandProcessor::UpdateSystemConstantValues(
 
 bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
                                             const VulkanShader* pixel_shader,
+                                            bool vertex_bindings_ready,
+                                            bool pixel_bindings_ready,
                                             bool interpreter_placeholder,
                                             bool placeholder_pixel_shader) {
 #if XE_GPU_FINE_GRAINED_DRAW_SCOPES
@@ -8570,11 +8581,10 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
     }
   }
 
-  // Textures and samplers. Only read a shader's binding lists when its bindings
-  // are ready - an async draw doesn't translate here, so a creation thread may
-  // still be populating them (reading size()/contents would race). Binding the
-  // reference is fine; only size()/iteration touch the racing buffer.
-  bool vertex_bindings_ready = vertex_shader->bindings_ready();
+  // Textures and samplers. Only read a stage's binding lists when it was ready
+  // at the draw's snapshot - a creation thread may still be populating them,
+  // and the snapshot keeps the counts matching the collected sampler vectors.
+  // Binding the reference is fine; only size()/iteration touch it.
   const std::vector<VulkanShader::SamplerBinding>& samplers_vertex =
       vertex_shader->GetSamplerBindingsAfterTranslation();
   const std::vector<VulkanShader::TextureBinding>& textures_vertex =
@@ -8586,7 +8596,7 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
   const std::vector<VulkanShader::SamplerBinding>* samplers_pixel;
   const std::vector<VulkanShader::TextureBinding>* textures_pixel;
   uint32_t sampler_count_pixel, texture_count_pixel;
-  if (pixel_shader && pixel_shader->bindings_ready()) {
+  if (pixel_shader && pixel_bindings_ready) {
     samplers_pixel = &pixel_shader->GetSamplerBindingsAfterTranslation();
     textures_pixel = &pixel_shader->GetTextureBindingsAfterTranslation();
     sampler_count_pixel = uint32_t(samplers_pixel->size());
@@ -8611,6 +8621,14 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
     texture_count_vertex = 0;
   }
 
+  // The descriptor write and the set-hash below both rely on this; a shorter
+  // vector would write fewer image infos than the count the set layout was
+  // chosen by.
+  assert_true(!sampler_count_vertex ||
+              current_samplers_vertex_.size() == sampler_count_vertex);
+  assert_true(!sampler_count_pixel ||
+              current_samplers_pixel_.size() == sampler_count_pixel);
+
   // Value-cache the texture/sampler descriptor sets: only force a re-write (by
   // clearing the stage's values-up-to-date bit) when the resolved VkImageView /
   // VkSampler handles, the binding counts, or the layout changed since the last
@@ -8631,7 +8649,8 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
           uint32_t texture_count, uint32_t sampler_count, bool is_vertex,
           const std::vector<VulkanShader::TextureBinding>* textures,
           VulkanTextureCache* texture_cache,
-          const std::pair<VulkanTextureCache::SamplerParameters, VkSampler>*
+          const std::vector<
+              std::pair<VulkanTextureCache::SamplerParameters, VkSampler>>&
               samplers) -> uint64_t {
     // Gather the reuse inputs (in this exact fixed order) into a reused scratch
     // buffer and hash them with one XXH3 call - NEON-accelerated on arm64,
@@ -8658,9 +8677,12 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
       }
     }
     if (sampler_count) {
-      for (uint32_t i = 0; i < sampler_count; ++i) {
+      // Iterate the vector, like the descriptor write below, rather than
+      // indexing it by a count sourced from the shader's binding list.
+      for (const std::pair<VulkanTextureCache::SamplerParameters, VkSampler>&
+               sampler_pair : samplers) {
         scratch.push_back(
-            uint64_t(reinterpret_cast<uintptr_t>(samplers[i].second)));
+            uint64_t(reinterpret_cast<uintptr_t>(sampler_pair.second)));
       }
       // Handle values can be reused: a destroyed sampler's VkSampler value
       // may come back from vkCreateSampler for different parameters, which
@@ -8685,15 +8707,16 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
       // image view (signalled by the texture cache's per-fetch-constant
       // bindings-changed mask), or any sampler in the stage's vector. The
       // content-hash is intentionally NOT computed here so edge mode's gate
-      // cost equals edge's gate only. Used-texture masks are guarded by
-      // bindings_ready() - an async draw may not have translated the stage yet.
+      // cost equals edge's gate only. Used-texture masks are guarded by the
+      // caller's readiness snapshot - an async draw may not have translated
+      // the stage yet.
       uint32_t textures_changed = texture_cache_->texture_bindings_changed();
       uint32_t used_texture_mask_vertex =
           vertex_bindings_ready
               ? vertex_shader->GetUsedTextureMaskAfterTranslation()
               : 0;
       uint32_t used_texture_mask_pixel =
-          (pixel_shader && pixel_shader->bindings_ready())
+          (pixel_shader && pixel_bindings_ready)
               ? pixel_shader->GetUsedTextureMaskAfterTranslation()
               : 0;
       if ((current_graphics_descriptor_set_values_up_to_date_ &
@@ -8722,7 +8745,7 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
       if (texture_count_vertex || sampler_count_vertex) {
         texture_set_hash_vertex = compute_texture_set_hash(
             texture_count_vertex, sampler_count_vertex, true, &textures_vertex,
-            texture_cache_.get(), current_samplers_vertex_.data());
+            texture_cache_.get(), current_samplers_vertex_);
         if (!current_texture_descriptor_set_hash_valid_vertex_ ||
             texture_set_hash_vertex !=
                 current_texture_descriptor_set_hash_vertex_) {
@@ -8735,8 +8758,7 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
       if (texture_count_pixel || sampler_count_pixel) {
         texture_set_hash_pixel = compute_texture_set_hash(
             texture_count_pixel, sampler_count_pixel, false, textures_pixel,
-            texture_cache_.get(),
-            samplers_pixel ? current_samplers_pixel_.data() : nullptr);
+            texture_cache_.get(), current_samplers_pixel_);
         if (!current_texture_descriptor_set_hash_valid_pixel_ ||
             texture_set_hash_pixel !=
                 current_texture_descriptor_set_hash_pixel_) {

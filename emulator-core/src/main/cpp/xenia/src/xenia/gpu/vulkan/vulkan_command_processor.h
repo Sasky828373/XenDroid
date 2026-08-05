@@ -547,8 +547,12 @@ class VulkanCommandProcessor final : public CommandProcessor {
       uint32_t used_texture_mask, reg::RB_DEPTHCONTROL normalized_depth_control,
       uint32_t normalized_color_mask,
       const draw_util::HostDepthPolygonOffset* host_depth_polygon_offset);
+  // *_bindings_ready is IssueDraw's per-draw readiness snapshot, the same one
+  // the sampler collection used - re-reading bindings_ready() here would race
+  // translation finishing mid-draw.
   bool UpdateBindings(const VulkanShader* vertex_shader,
                       const VulkanShader* pixel_shader,
+                      bool vertex_bindings_ready, bool pixel_bindings_ready,
                       bool interpreter_placeholder = false,
                       bool placeholder_pixel_shader = false);
   // Allocates a descriptor set and fills one or two VkWriteDescriptorSet

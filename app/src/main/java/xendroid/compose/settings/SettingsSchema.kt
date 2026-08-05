@@ -134,16 +134,15 @@ object SettingsSchema {
             b("GPU", "guest_display_refresh_cap", "Cap guest display refresh (VSync)", true),
             b("GPU", "store_shaders", "Store shaders", true),
             b("GPU", "resolve_resolution_scale_fill_half_pixel_offset", "Resolve scale: fill half-pixel offset", true),
-            // readback_resolve is a STRING cvar (NOT a bool): CPU readback of render-to-texture
-            // resolve results. uma=read the mapped shared-memory buffer directly on unified-memory
-            // GPUs (Adreno), no GPU staging copy - falls back to fast when the buffer is not
-            // host-visible (cvar default); fast=copy every frame; some=skip copy on cache hit;
-            // full=wait for GPU (accurate but a GPU-CPU sync stall); none=disable readback (some
-            // games render better without it, and it avoids the stall).
+            // readback_resolve is a STRING cvar (NOT a bool): which render-to-texture resolves
+            // are copied back into guest RAM. uma=no copy, the CPU reads the host-mapped shared
+            // memory directly - the only mode that works on Adreno, which cannot import guest RAM
+            // (cvar default); fast=copy only resolves the CPU reads back; all=copy every resolve;
+            // none=disable readback. The retired some/full modes now parse as uma.
             l("GPU", "readback_resolve", "Readback resolve", "uma",
                 "uma" to "UMA (direct map, no copy)",
-                "fast" to "Fast (copy every frame)", "some" to "Some (skip copy on cache hit)",
-                "full" to "Full (wait for GPU, slow)", "none" to "None (disabled)"),
+                "fast" to "Fast (copy CPU-read resolves)", "all" to "All (copy every resolve)",
+                "none" to "None (disabled)"),
             // How guest occlusion queries (PM4 EVENT_WRITE_ZPD) are serviced. 'fake' fabricates a
             // result with zero GPU-query overhead (fastest; some effects e.g. lens flares may look
             // slightly wrong); 'fast'/'fast-alt' issue real async Vulkan queries without stalling;

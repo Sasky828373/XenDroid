@@ -22,6 +22,7 @@
 #include "xenia/ui/vulkan/vulkan_util.h"
 
 DECLARE_bool(gpu_allow_invalid_upload_range);
+DECLARE_bool(shared_memory_zero_copy);
 
 DEFINE_bool(vulkan_sparse_shared_memory, true,
             "Enable sparse binding for shared memory emulation. Disabling it "
@@ -43,14 +44,6 @@ DEFINE_bool(vulkan_shared_memory_host_visible, true,
             "map it so resolve readback (readback_resolve=uma) can read guest "
             "memory directly without a GPU staging copy. Only applies to the "
             "dense (non-sparse) buffer.",
-            "Vulkan");
-
-DEFINE_bool(vulkan_shared_memory_zero_copy, false,
-            "Alias guest RAM as the shared-memory buffer via "
-            "VK_EXT_external_memory_host so memexport output and guest-built "
-            "indices are shared with the GPU without upload/readback copies, "
-            "matching the Metal backend. Fast on unified-memory GPUs; on "
-            "discrete GPUs shared-memory fetches cross PCIe and are slow.",
             "Vulkan");
 
 namespace xe {
@@ -81,7 +74,7 @@ bool VulkanSharedMemory::Initialize() {
   // Zero-copy: alias guest RAM as the buffer. On success the buffer is a single
   // fully-resident non-sparse allocation backed by guest RAM, so the normal
   // sparse/device-local paths below are skipped.
-  if (cvars::vulkan_shared_memory_zero_copy && TryInitializeZeroCopy()) {
+  if (cvars::shared_memory_zero_copy && TryInitializeZeroCopy()) {
     last_usage_ = Usage::kTransferDestination;
     last_written_range_ = std::make_pair<uint32_t, uint32_t>(0, 0);
     upload_buffer_pool_ = std::make_unique<ui::vulkan::VulkanUploadBufferPool>(

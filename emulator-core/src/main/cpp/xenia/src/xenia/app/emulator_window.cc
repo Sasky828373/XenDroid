@@ -1556,19 +1556,19 @@ void EmulatorWindow::CycleReadbackResolve() {
     return;
   }
 
-  // Edge moved SetReadbackResolveMode onto CommandProcessor and switched it
-  // from a string to the ReadbackResolveMode enum. Preserve the original
-  // cycle order: fast -> full -> none -> fast.
-  const std::string& current = cvars::readback_resolve;
-  if (current == "fast") {
-    command_processor->SetReadbackResolveMode(
-        gpu::ReadbackResolveMode::kFull);
-  } else if (current == "full") {
-    command_processor->SetReadbackResolveMode(
-        gpu::ReadbackResolveMode::kDisabled);
-  } else {
-    command_processor->SetReadbackResolveMode(
-        gpu::ReadbackResolveMode::kFast);
+  gpu::ReadbackResolveMode current =
+      command_processor->GetReadbackResolveMode();
+  gpu::ReadbackResolveMode next;
+  switch (current) {
+    case gpu::ReadbackResolveMode::kDisabled:
+      next = gpu::ReadbackResolveMode::kFast;
+      break;
+    case gpu::ReadbackResolveMode::kFast:
+      next = gpu::ReadbackResolveMode::kAll;
+      break;
+    default:
+      next = gpu::ReadbackResolveMode::kDisabled;
+      break;
   }
 }
 

@@ -80,7 +80,7 @@ object SettingDescriptions {
         "protect_on_release" to "Locks freed memory so any later access faults, catching use-after-free bugs",
         "protect_zero" to "Blocks reads and writes to the zero page so null-pointer accesses fault instead of corrupting",
         "readback_memexport" to "Read shader memory-export data back to the CPU; some games need it, off is slightly faster",
-        "readback_resolve" to "How the CPU reads back rendered results, trading accuracy against GPU sync stalls",
+        "readback_resolve" to "Which resolves are copied back to guest RAM; UMA reads mapped memory directly and is the only mode that works on Adreno",
         "render_target_path" to "Render target emulation path: fast fixed-function or slower pixel-exact software blending",
         "resolve_resolution_scale_fill_half_pixel_offset" to "With resolution scaling, patch edge gaps from the half-pixel offset; some games need it to render",
         "scribble_heap" to "Fills newly allocated heap memory with a junk value to expose uninitialized-memory bugs",

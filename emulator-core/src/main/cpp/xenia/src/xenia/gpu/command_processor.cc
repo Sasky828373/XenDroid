@@ -85,14 +85,14 @@ DEFINE_string(
 
 DEFINE_string(
     readback_resolve, "uma",
-    "Controls CPU readback of render-to-texture resolve results.\n"
-    " uma: Read the mapped shared-memory buffer directly on unified-memory\n"
-    "      GPUs (Adreno etc.) - no GPU staging copy; falls back to fast when\n"
-    "      the buffer is not host-visible (default)\n"
-    " fast: Read from previous frame, copy every frame\n"
-    " some: Read from previous frame, skip copy on cache hit\n"
-    " full: Wait for GPU to finish (accurate but slow, GPU-CPU sync stall)\n"
-    " none: Disable readback completely (some games render better without it)",
+    "Controls which render-to-texture resolves are copied back into guest "
+    "RAM.\n"
+    " uma: No copy - the CPU reads the host-mapped shared memory directly. "
+    "The default, and the only mode that works on unified-memory GPUs "
+    "(Adreno). Needs host-mapped shared memory and no resolution scaling.\n"
+    " fast: Copy only resolves the CPU reads back\n"
+    " all: Copy every resolve\n"
+    " none: Disable readback completely (improves performance).\n",
     "GPU");
 UPDATE_from_string(readback_resolve, 2026, 7, 24, 12, "fast");
 
@@ -139,19 +139,22 @@ std::atomic<int> readback_resolve_mode_cache{-1};
 std::atomic<int> zpd_mode_cache{-1};
 
 ReadbackResolveMode ParseReadbackResolveMode(const std::string& mode) {
-  if (mode == "full") {
-    return ReadbackResolveMode::kFull;
-  } else if (mode == "some") {
-    return ReadbackResolveMode::kSome;
+  if (mode == "all") {
+    return ReadbackResolveMode::kAll;
   } else if (mode == "uma") {
     return ReadbackResolveMode::kUma;
-  } else if (mode == "fast") {
-    return ReadbackResolveMode::kFast;
   } else if (mode == "none") {
     return ReadbackResolveMode::kDisabled;
+  } else if (mode == "fast") {
+    return ReadbackResolveMode::kFast;
   } else {
-    // Default to "uma" for any unrecognized value (falls back to fast when the
-    // shared-memory buffer is not host-mapped).
+    // Retired values (some/full) and typos: fall back to the default rather
+    // than to a mode that copies nothing on unified-memory GPUs.
+    static bool logged = false;
+    if (!logged) {
+      logged = true;
+      XELOGW("Unknown readback_resolve value '{}' - using uma", mode);
+    }
     return ReadbackResolveMode::kUma;
   }
 }
@@ -412,11 +415,8 @@ void CommandProcessor::SetReadbackResolveMode(ReadbackResolveMode mode) {
     case ReadbackResolveMode::kDisabled:
       mode_str = "none";
       break;
-    case ReadbackResolveMode::kSome:
-      mode_str = "some";
-      break;
-    case ReadbackResolveMode::kFull:
-      mode_str = "full";
+    case ReadbackResolveMode::kAll:
+      mode_str = "all";
       break;
     case ReadbackResolveMode::kUma:
       mode_str = "uma";

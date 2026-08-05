@@ -21,6 +21,7 @@
 #endif
 
 #include <cerrno>
+#include <chrono>
 #include <cstring>
 #include "xenia/base/logging.h"
 #include "xenia/base/math.h"
@@ -61,6 +62,8 @@ extern "C" {
 
 DEFINE_bool(ffmpeg_verbose, false, "Verbose FFmpeg output (debug and above)",
             "APU");
+
+DECLARE_bool(apu_aaudio_log_stats);
 
 DEFINE_bool(use_dedicated_xma_thread, true,
             "Enables XMA decoding on separate thread. Disabled should produce "
@@ -213,15 +216,47 @@ void XmaDecoder::WorkerThreadMain() {
            std::strerror(errno));
   }
 #endif
+  // Whether decode keeps up. If this thread is saturated, the guest mixer has
+  // nothing to submit and the audio queue drains even though the audio worker
+  // is running normally.
+  auto stats_last = std::chrono::steady_clock::now();
+  uint64_t passes = 0, worked_contexts = 0, work_ns = 0, idle_waits = 0;
+
   while (worker_running_) {
     // Okay, let's loop through XMA contexts to find ones we need to decode!
     bool did_work = false;
+    const bool measure = cvars::apu_aaudio_log_stats;
+    const auto pass_begin = measure ? std::chrono::steady_clock::now()
+                                    : std::chrono::steady_clock::time_point{};
     for (uint32_t n = 0; n < kContextCount; n++) {
       bool worked = contexts_[n]->Work();
       if (worked) {
         contexts_[n]->SignalWorkDone();
+        if (measure) {
+          ++worked_contexts;
+        }
       }
       did_work = did_work || worked;
+    }
+    if (measure) {
+      ++passes;
+      work_ns += static_cast<uint64_t>(
+          std::chrono::duration_cast<std::chrono::nanoseconds>(
+              std::chrono::steady_clock::now() - pass_begin)
+              .count());
+      const auto now = std::chrono::steady_clock::now();
+      if (now - stats_last >= std::chrono::seconds(1)) {
+        XELOGI(
+            "XmaWork: {} passes, {} context decodes, busy {:.1f}ms/s "
+            "({:.1f}% of wall), {} idle waits",
+            passes, worked_contexts, double(work_ns) / 1e6,
+            double(work_ns) / 1e7, idle_waits);
+        passes = 0;
+        worked_contexts = 0;
+        work_ns = 0;
+        idle_waits = 0;
+        stats_last = now;
+      }
     }
 
     if (paused_) {
@@ -231,6 +266,9 @@ void XmaDecoder::WorkerThreadMain() {
 
     if (did_work) {
       continue;
+    }
+    if (cvars::apu_aaudio_log_stats) {
+      ++idle_waits;
     }
     xe::threading::Wait(work_event_.get(), false);
   }

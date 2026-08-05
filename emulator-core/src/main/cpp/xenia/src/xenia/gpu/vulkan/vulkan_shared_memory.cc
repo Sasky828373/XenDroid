@@ -23,6 +23,7 @@
 
 DECLARE_bool(gpu_allow_invalid_upload_range);
 DECLARE_bool(shared_memory_zero_copy);
+DECLARE_string(readback_resolve);
 
 DEFINE_bool(vulkan_sparse_shared_memory, true,
             "Enable sparse binding for shared memory emulation. Disabling it "
@@ -113,7 +114,15 @@ bool VulkanSharedMemory::Initialize() {
     buffer_create_info.queueFamilyIndexCount = 0;
     buffer_create_info.pQueueFamilyIndices = nullptr;
   }
-  if (cvars::vulkan_sparse_shared_memory &&
+  // readback_resolve=uma reads guest RAM through this buffer's host mapping,
+  // and only the dense buffer below can be mapped, so uma overrides sparse.
+  const bool needs_host_mapping = cvars::readback_resolve == "uma";
+  if (needs_host_mapping && cvars::vulkan_sparse_shared_memory) {
+    XELOGI(
+        "Shared memory: sparse binding disabled so the buffer can be "
+        "host-mapped for readback_resolve=uma");
+  }
+  if (cvars::vulkan_sparse_shared_memory && !needs_host_mapping &&
       vulkan_device->properties().sparseResidencyBuffer) {
     if (dfn.vkCreateBuffer(device, &buffer_create_info, nullptr, &buffer_) ==
         VK_SUCCESS) {

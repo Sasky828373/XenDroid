@@ -49,6 +49,10 @@ struct kPacketHandle {
 
 static constexpr int kIdToSampleRate[4] = {24000, 32000, 44100, 48000};
 
+// Per-second census of Work() outcomes, see xma_context_new.cc.
+void GetXmaBailStats(uint64_t* no_output, uint64_t* consume_empty,
+                     uint64_t* no_space, uint64_t* decoded);
+
 class XmaContextNew : public XmaContext {
  public:
   static constexpr uint32_t kBitsPerPacketHeader = 32;

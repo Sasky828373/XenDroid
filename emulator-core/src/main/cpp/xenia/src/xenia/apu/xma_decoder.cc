@@ -221,6 +221,8 @@ void XmaDecoder::WorkerThreadMain() {
   // is running normally.
   auto stats_last = std::chrono::steady_clock::now();
   uint64_t passes = 0, worked_contexts = 0, work_ns = 0, idle_waits = 0;
+  uint64_t last_decoded = 0, last_no_out = 0, last_consume_empty = 0,
+           last_no_space = 0;
 
   while (worker_running_) {
     // Okay, let's loop through XMA contexts to find ones we need to decode!
@@ -247,11 +249,22 @@ void XmaDecoder::WorkerThreadMain() {
               .count());
       const auto now = std::chrono::steady_clock::now();
       if (now - stats_last >= std::chrono::seconds(1)) {
+        uint64_t no_out = 0, consume_empty = 0, no_space = 0, decoded = 0;
+        GetXmaBailStats(&no_out, &consume_empty, &no_space, &decoded);
         XELOGI(
             "XmaWork: {} passes, {} context decodes, busy {:.1f}ms/s "
             "({:.1f}% of wall), {} idle waits",
             passes, worked_contexts, double(work_ns) / 1e6,
             double(work_ns) / 1e7, idle_waits);
+        XELOGI(
+            "XmaBail: decoded {} | no output buffer {} | consume empty {} "
+            "| no ring space {} (deltas)",
+            decoded - last_decoded, no_out - last_no_out,
+            consume_empty - last_consume_empty, no_space - last_no_space);
+        last_decoded = decoded;
+        last_no_out = no_out;
+        last_consume_empty = consume_empty;
+        last_no_space = no_space;
         passes = 0;
         worked_contexts = 0;
         work_ns = 0;

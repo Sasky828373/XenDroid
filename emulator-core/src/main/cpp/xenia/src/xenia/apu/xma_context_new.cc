@@ -112,6 +112,22 @@ RingBuffer XmaContextNew::PrepareOutputRingBuffer(XMA_CONTEXT_DATA* data) {
   return output_rb;
 }
 
+// Why a serviced kick produced no samples. A context that keeps bailing here
+// leaves its output buffer untouched, so the guest mixes whatever was already
+// there - which is what "complete static" sounds like.
+std::atomic<uint64_t> g_xma_bail_no_output_buffer{0};
+std::atomic<uint64_t> g_xma_bail_consume_empty{0};
+std::atomic<uint64_t> g_xma_bail_no_space{0};
+std::atomic<uint64_t> g_xma_decoded{0};
+
+void GetXmaBailStats(uint64_t* no_output, uint64_t* consume_empty,
+                     uint64_t* no_space, uint64_t* decoded) {
+  *no_output = g_xma_bail_no_output_buffer.load(std::memory_order_relaxed);
+  *consume_empty = g_xma_bail_consume_empty.load(std::memory_order_relaxed);
+  *no_space = g_xma_bail_no_space.load(std::memory_order_relaxed);
+  *decoded = g_xma_decoded.load(std::memory_order_relaxed);
+}
+
 bool XmaContextNew::Work() {
   if (!is_enabled() || !is_allocated()) {
     return false;
@@ -126,6 +142,7 @@ bool XmaContextNew::Work() {
   const XMA_CONTEXT_DATA initial_data = data;
 
   if (!data.output_buffer_valid) {
+    g_xma_bail_no_output_buffer.fetch_add(1, std::memory_order_relaxed);
     return true;
   }
 
@@ -135,6 +152,7 @@ bool XmaContextNew::Work() {
     // Nothing to drain — don't touch the context or we'll reset the
     // game's output buffer offsets, causing stale PCM to be re-read.
     if (current_frame_remaining_subframes_ == 0) {
+      g_xma_bail_consume_empty.fetch_add(1, std::memory_order_relaxed);
       return true;
     }
     XELOGAPU("XmaContext {}: Consume-only context, draining subframes", id());
@@ -168,10 +186,12 @@ bool XmaContextNew::Work() {
     XELOGD("XmaContext {}: No space for subframe decoding {}/{}!", id(),
            minimum_subframe_decode_count,
            remaining_subframe_blocks_in_output_buffer_);
+    g_xma_bail_no_space.fetch_add(1, std::memory_order_relaxed);
     StoreContextMerged(data, initial_data, context_ptr);
     return true;
   }
 
+  g_xma_decoded.fetch_add(1, std::memory_order_relaxed);
   while (remaining_subframe_blocks_in_output_buffer_ >=
          minimum_subframe_decode_count) {
     XELOGAPU(

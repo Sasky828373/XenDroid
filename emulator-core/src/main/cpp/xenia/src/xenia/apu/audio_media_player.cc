@@ -90,7 +90,56 @@ void ConvertAudioFrame(AVFrame* frame, int channel_count,
       break;
     }
 
+    // Planar and packed integer formats. FFmpeg hands these back for WMA and
+    // MP3, and leaving them unhandled left the frame buffer holding whatever
+    // was there before: the driver then played uninitialised floats as
+    // full-scale noise over the game's own audio.
+    case AV_SAMPLE_FMT_S16P: {
+      for (int sample = 0; sample < frame->nb_samples; sample++) {
+        for (int ch = 0; ch < channel_count; ch++) {
+          const int16_t v =
+              reinterpret_cast<int16_t*>(frame->data[ch])[sample];
+          framebuffer->push_back(float(v) / 32768.0f);
+        }
+      }
+      break;
+    }
+
+    case AV_SAMPLE_FMT_S16: {
+      const int16_t* d = reinterpret_cast<int16_t*>(frame->data[0]);
+      const int count = frame->nb_samples * channel_count;
+      for (int i = 0; i < count; i++) {
+        framebuffer->push_back(float(d[i]) / 32768.0f);
+      }
+      break;
+    }
+
+    case AV_SAMPLE_FMT_S32P: {
+      for (int sample = 0; sample < frame->nb_samples; sample++) {
+        for (int ch = 0; ch < channel_count; ch++) {
+          const int32_t v =
+              reinterpret_cast<int32_t*>(frame->data[ch])[sample];
+          framebuffer->push_back(float(v) / 2147483648.0f);
+        }
+      }
+      break;
+    }
+
+    case AV_SAMPLE_FMT_S32: {
+      const int32_t* d = reinterpret_cast<int32_t*>(frame->data[0]);
+      const int count = frame->nb_samples * channel_count;
+      for (int i = 0; i < count; i++) {
+        framebuffer->push_back(float(d[i]) / 2147483648.0f);
+      }
+      break;
+    }
+
     default:
+      // Silence beats noise: without this the buffer keeps stale samples.
+      XELOGW("XMP: unhandled sample format {}, substituting silence",
+             int(frame->format));
+      framebuffer->insert(framebuffer->end(),
+                          size_t(frame->nb_samples) * channel_count, 0.0f);
       break;
   }
 }

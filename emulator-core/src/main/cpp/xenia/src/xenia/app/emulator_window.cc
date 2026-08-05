@@ -37,6 +37,7 @@
 #include "xenia/kernel/xam/profile_manager.h"
 #include "xenia/kernel/xam/xam_module.h"
 #include "xenia/kernel/xam/xam_state.h"
+#include "xenia/config.h"
 #include "xenia/kernel/xconfig.h"
 #include "xenia/ui/file_picker.h"
 #include "xenia/ui/graphics_provider.h"
@@ -57,6 +58,7 @@ DECLARE_string(hid);
 DECLARE_bool(guide_button);
 
 DECLARE_bool(clear_memory_page_state);
+DECLARE_bool(memexport_await_fences);
 
 DECLARE_string(readback_resolve);
 
@@ -1536,11 +1538,26 @@ void EmulatorWindow::GamepadHotKeys() {
 }
 
 void EmulatorWindow::ToggleGPUSetting(gpu::GPUSetting setting) {
+  const char* cvar_name = nullptr;
+  bool new_value = false;
+
   switch (setting) {
     case GPUSetting::ClearMemoryPageState:
-      SaveGPUSetting(GPUSetting::ClearMemoryPageState,
-                     !cvars::clear_memory_page_state);
+      new_value = !cvars::clear_memory_page_state;
+      SaveGPUSetting(GPUSetting::ClearMemoryPageState, new_value);
+      cvar_name = "clear_memory_page_state";
       break;
+    case GPUSetting::MemexportAwaitFences:
+      new_value = !cvars::memexport_await_fences;
+      SaveGPUSetting(GPUSetting::MemexportAwaitFences, new_value);
+      cvar_name = "memexport_await_fences";
+      break;
+  }
+
+  // Persist to the per-game config through the fork's helper, which already
+  // does upstream's load/insert/save and the title-open check.
+  if (cvar_name) {
+    config::SaveGameConfigSetting(emulator_, "GPU", cvar_name, new_value);
   }
 }
 

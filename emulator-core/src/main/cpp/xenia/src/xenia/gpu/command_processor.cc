@@ -97,6 +97,27 @@ DEFINE_string(
 UPDATE_from_string(readback_resolve, 2026, 7, 24, 12, "fast");
 
 DEFINE_bool(
+    memexport_enable, false,
+    "Make memory export output visible to the CPU by routing the draws that "
+    "write it to a buffer aliasing guest RAM. Needed by games that read "
+    "exported data on the CPU. Disabling it keeps the output in device-local "
+    "memory, which is faster for the draws that consume it on the GPU. Applies "
+    "at title launch. Off by default here: the host buffer needs "
+    "VK_EXT_external_memory_host, which Turnip does not expose, so the import "
+    "fails and the output stays device-local either way.",
+    "GPU");
+
+DEFINE_bool(
+    memexport_await_fences, false,
+    "Wait for the GPU to finish outstanding memory export before signalling a "
+    "fence the guest reads, so exported data is in guest RAM by the time the "
+    "guest looks at it. Disabling it avoids the stall but games reading "
+    "exported data on the CPU may see stale contents. Needs memexport_enable. "
+    "Off by default here: without the host buffer the wait is a full GPU stall "
+    "per fence that cannot make the output visible anyway.",
+    "GPU");
+
+DEFINE_bool(
     precise_interpolation, true,
     "Manually interpolate pixel shader inputs with barycentric coordinates to "
     "exactly match the guest and avoid hardware interpolation precision "
@@ -118,6 +139,9 @@ void SaveGPUSetting(GPUSetting setting, uint64_t value) {
     case GPUSetting::ClearMemoryPageState:
       OVERRIDE_bool(clear_memory_page_state, static_cast<bool>(value));
       break;
+    case GPUSetting::MemexportAwaitFences:
+      OVERRIDE_bool(memexport_await_fences, static_cast<bool>(value));
+      break;
   }
 }
 
@@ -125,6 +149,8 @@ bool GetGPUSetting(GPUSetting setting) {
   switch (setting) {
     case GPUSetting::ClearMemoryPageState:
       return cvars::clear_memory_page_state;
+    case GPUSetting::MemexportAwaitFences:
+      return cvars::memexport_await_fences;
     default:
       return false;
   }

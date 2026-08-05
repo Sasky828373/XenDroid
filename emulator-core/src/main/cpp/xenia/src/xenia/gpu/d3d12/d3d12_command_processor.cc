@@ -2555,15 +2555,15 @@ Shader* D3D12CommandProcessor::LoadShader(xenos::ShaderType shader_type,
   return pipeline_cache_->LoadShader(shader_type, host_address, dword_count);
 }
 
-void D3D12CommandProcessor::EnsureMemexportRangeInDeviceBuffer(
+bool D3D12CommandProcessor::EnsureMemexportRangeInDeviceBuffer(
     uint32_t base_bytes, uint32_t size_bytes) {
   if (shared_memory_->GetHostBuffer() == nullptr || !size_bytes ||
       base_bytes >= SharedMemory::kBufferSize) {
-    return;
+    return false;
   }
   size_bytes = std::min(size_bytes, SharedMemory::kBufferSize - base_bytes);
   if (!IsMemexportRange(base_bytes, size_bytes)) {
-    return;
+    return false;
   }
   // Transition the host buffer to a copy source (ordering the memexport writes,
   // which may have run several draws ago, before the read) and the device
@@ -2576,6 +2576,7 @@ void D3D12CommandProcessor::EnsureMemexportRangeInDeviceBuffer(
   deferred_command_list_.D3DCopyBufferRegion(
       shared_memory_->GetBuffer(), base_bytes, shared_memory_->GetHostBuffer(),
       base_bytes, size_bytes);
+  return true;
 }
 
 bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type,
@@ -3182,7 +3183,8 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type,
     // Invalidate textures in memexported memory and watch for changes.
     for (const draw_util::MemExportRange& memexport_range : memexport_ranges_) {
       shared_memory_->RangeWrittenByGpu(
-          memexport_range.base_address_dwords << 2, memexport_range.size_bytes);
+          memexport_range.base_address_dwords << 2, memexport_range.size_bytes,
+          !route_to_host);
     }
     if (route_to_host) {
       // Output landed in host_buffer_ (guest RAM), already CPU coherent, so no

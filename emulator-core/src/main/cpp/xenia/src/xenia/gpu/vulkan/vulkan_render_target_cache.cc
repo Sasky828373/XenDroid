@@ -21,6 +21,7 @@
 #include "xenia/base/cvar.h"
 #include "xenia/base/logging.h"
 #include "xenia/base/math.h"
+#include "xenia/base/profiling.h"
 #include "xenia/gpu/draw_util.h"
 #include "xenia/gpu/gpu_flags.h"
 #include "xenia/gpu/registers.h"
@@ -2624,6 +2625,7 @@ bool VulkanRenderTargetCache::Resolve(const Memory& memory,
                                       VulkanTextureCache& texture_cache,
                                       uint32_t& written_address_out,
                                       uint32_t& written_length_out) {
+  SCOPE_profile_cpu_f("gpu");
   written_address_out = 0;
   written_length_out = 0;
 
@@ -3195,6 +3197,7 @@ void VulkanRenderTargetCache::LogResolveDetailsOnFrameEnd() {
 bool VulkanRenderTargetCache::Update(
     bool is_rasterization_done, reg::RB_DEPTHCONTROL normalized_depth_control,
     uint32_t normalized_color_mask, const Shader& vertex_shader) {
+  SCOPE_profile_cpu_f("gpu");
   // Any transfers queued by a previous Update() but never encoded (e.g. the
   // draw was skipped) must be performed before this update reconfigures the
   // render targets, otherwise they'd be lost.
@@ -7299,6 +7302,7 @@ void VulkanRenderTargetCache::PerformTransfersAndResolveClears(
     const uint64_t* render_target_resolve_clear_values,
     const Transfer::Rectangle* resolve_clear_rectangle,
     bool in_current_render_pass) {
+  SCOPE_profile_cpu_f("gpu");
   assert_true(GetPath() == Path::kHostRenderTargets);
 
   bool resolve_clear_needed =

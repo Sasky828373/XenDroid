@@ -245,8 +245,8 @@ DEFINE_bool(use_fuzzy_alpha_epsilon, false,
 DEFINE_bool(
     texture_gradient_exp_bias, false,
     "Apply the per-axis gradient exponent biases (LodBiasH/V, word 4 of the "
-    "fetch constant) when sampling with computed gradients. Correct, but costs "
-    "a second exp2 plus the bitfield extracts in every gradient texture fetch, "
-    "which is measurable on fragment-bound mobile GPUs. Off uses one exp2 for "
-    "both axes and ignores the biases, which are zero in most games.",
+    "fetch constant) when sampling with computed gradients. The biases are zero "
+    "in most games, and honoring them costs a handful of integer ops plus two "
+    "multiplies in every gradient texture fetch, which is measurable where "
+    "fragment shading is the bottleneck.",
     "GPU");

@@ -1718,32 +1718,35 @@ void SpirvShaderTranslator::ProcessTextureFetchInstruction(
           // and the bitfield extracts land in every gradient fetch, and that is
           // measurable where fragment shading is the bottleneck. Off collapses
           // back to one exp2 shared by both axes and ignores the biases.
+          spv::Id lod_gradient_scale = builder_->createUnaryBuiltinCall(
+              type_float_, ext_inst_glsl_std_450_, GLSLstd450Exp2, lod);
           spv::Id lod_gradient_scale_h, lod_gradient_scale_v;
           if (cvars::texture_gradient_exp_bias) {
-            spv::Id grad_exp_adjust_h = builder_->createUnaryOp(
-                spv::OpConvertSToF, type_float_,
-                builder_->createTriOp(spv::OpBitFieldSExtract, type_int_,
-                                      fetch_constant_word_4_signed,
-                                      builder_->makeUintConstant(22),
-                                      builder_->makeUintConstant(5)));
-            spv::Id grad_exp_adjust_v = builder_->createUnaryOp(
-                spv::OpConvertSToF, type_float_,
-                builder_->createTriOp(spv::OpBitFieldSExtract, type_int_,
-                                      fetch_constant_word_4_signed,
-                                      builder_->makeUintConstant(27),
-                                      builder_->makeUintConstant(5)));
-            lod_gradient_scale_h = builder_->createUnaryBuiltinCall(
-                type_float_, ext_inst_glsl_std_450_, GLSLstd450Exp2,
-                builder_->createNoContractionBinOp(spv::OpFAdd, type_float_,
-                                                   lod, grad_exp_adjust_h));
-            lod_gradient_scale_v = builder_->createUnaryBuiltinCall(
-                type_float_, ext_inst_glsl_std_450_, GLSLstd450Exp2,
-                builder_->createNoContractionBinOp(spv::OpFAdd, type_float_,
-                                                   lod, grad_exp_adjust_v));
+            // exp2(lod + bias) == exp2(lod) * 2^bias, and bias is a 5-bit
+            // signed field, so 2^bias is built exactly by dropping bias + 127
+            // into a float exponent. Keeps a second transcendental out of
+            // every gradient fetch.
+            auto exp2_of_field = [&](uint32_t bit_offset) {
+              spv::Id field = builder_->createTriOp(
+                  spv::OpBitFieldSExtract, type_int_,
+                  fetch_constant_word_4_signed,
+                  builder_->makeUintConstant(bit_offset),
+                  builder_->makeUintConstant(5));
+              return builder_->createUnaryOp(
+                  spv::OpBitcast, type_float_,
+                  builder_->createBinOp(
+                      spv::OpShiftLeftLogical, type_int_,
+                      builder_->createBinOp(spv::OpIAdd, type_int_, field,
+                                            builder_->makeIntConstant(127)),
+                      builder_->makeIntConstant(23)));
+            };
+            lod_gradient_scale_h = builder_->createNoContractionBinOp(
+                spv::OpFMul, type_float_, lod_gradient_scale, exp2_of_field(22));
+            lod_gradient_scale_v = builder_->createNoContractionBinOp(
+                spv::OpFMul, type_float_, lod_gradient_scale, exp2_of_field(27));
           } else {
-            lod_gradient_scale_h = builder_->createUnaryBuiltinCall(
-                type_float_, ext_inst_glsl_std_450_, GLSLstd450Exp2, lod);
-            lod_gradient_scale_v = lod_gradient_scale_h;
+            lod_gradient_scale_h = lod_gradient_scale;
+            lod_gradient_scale_v = lod_gradient_scale;
           }
           switch (instr.dimension) {
             case xenos::FetchOpDimension::k1D: {

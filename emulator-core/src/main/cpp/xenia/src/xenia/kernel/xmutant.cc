@@ -154,7 +154,7 @@ X_STATUS XMutant::ReleaseMutant(uint32_t priority_increment, bool abandon,
     owning_thread_ = nullptr;
     RemoveMutantOwned(memory(), this);
     free_signal_->Release(1, nullptr);
-    kernel_state()->guest_scheduler()->WakeAll();
+    WakeCooperativeWaiters();
   }
   return X_STATUS_SUCCESS;
 }
@@ -225,13 +225,13 @@ void XMutant::AbandonAllOwnedByThread(KernelState* ks, XThread* thread) {
         // Only the thread that held it releases, however deep its recursion.
         obj->recursion_count_ = 0;
         obj->free_signal_->Release(1, nullptr);
+        obj->WakeCooperativeWaiters();
       }
     }
     entry = next;
   }
   kthread->mutants_list.flink_ptr = head_addr;
   kthread->mutants_list.blink_ptr = head_addr;
-  ks->guest_scheduler()->WakeAll();
 }
 
 bool XMutant::IsReenteredByCurrentThread() {
@@ -269,6 +269,21 @@ void XMutant::WaitCallback() {
                            ->TranslateVirtual<X_KMUTANT*>(guest_object())
                            ->header.signal_state;
   signal_state = signal_state - 1;
+}
+
+void XMutant::CooperativeWaitBegin(XThread* thread) { waiters_.Add(thread); }
+
+void XMutant::CooperativeWaitEnd(XThread* thread) {
+  // Poke the new front so it re-polls now.
+  if (waiters_.Remove(thread)) {
+    WakeCooperativeWaiters();
+  }
+}
+
+bool XMutant::CooperativeMayAcquire(XThread* thread) {
+  // The owner bypasses the queue so a recursive acquire cannot self-deadlock
+  // behind its own waiters.
+  return owning_thread_.load() == thread || waiters_.MayAcquire(thread);
 }
 
 }  // namespace kernel

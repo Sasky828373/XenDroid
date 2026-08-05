@@ -13,6 +13,8 @@
 #include <algorithm>
 #include <atomic>
 #include <cstddef>
+#include <deque>
+#include <mutex>
 #include <string>
 
 #include "xenia/base/threading.h"
@@ -34,6 +36,22 @@ class XThread;
 
 template <typename T>
 class object_ref;
+
+// FIFO of cooperative fiber waiters, shared by the permit-gated types so a
+// parked waiter is not starved by a running acquirer that never parks.
+class CooperativeWaiterFifo {
+ public:
+  void Add(XThread* thread);
+  // Unregisters |thread|, returning true if a waiter remains to be woken.
+  bool Remove(XThread* thread);
+  // True when |thread| is first in line (or no one is queued).
+  bool MayAcquire(XThread* thread);
+  bool HasWaiters();
+
+ private:
+  std::mutex lock_;
+  std::deque<XThread*> waiters_;
+};
 
 enum X_DISPATCHER_FLAGS : uint8_t {
   DISPATCHER_MANUAL_RESET_EVENT = 0,
@@ -268,6 +286,15 @@ class XObject {
   virtual bool CooperativeMayAcquire(XThread* thread) { return true; }
 
  public:
+  // Bumped by every state change that could satisfy a cooperative waiter, so
+  // the scheduler can skip re-polling a parked waiter until it moves.
+  uint32_t cooperative_signal_epoch() const {
+    return cooperative_signal_epoch_.load();
+  }
+  // Bumps the epoch, then wakes the dispatch threads. Call after the host
+  // primitive is signaled, never before.
+  void WakeCooperativeWaiters();
+
   // Registers |thread| as a cooperative waiter on this object and records the
   // registration on the thread, so a terminate that never unwinds the parked
   // stack can still release it.
@@ -304,6 +331,8 @@ class XObject {
   KernelState* kernel_state_;
 
   uint32_t priority_increment_ = 0;
+
+  std::atomic<uint32_t> cooperative_signal_epoch_{0};
 
   // Host objects are persisted through resets/etc.
   bool host_object_ = false;

@@ -59,6 +59,9 @@ class XEvent : public XObject {
   xe::threading::WaitHandle* GetWaitHandle() override { return event_.get(); }
   void WaitCallback() override;
 
+  void CooperativeWaitBegin(XThread* thread) override;
+  void CooperativeWaitEnd(XThread* thread) override;
+
  private:
   void RecordCreator();
 
@@ -69,6 +72,8 @@ class XEvent : public XObject {
   uint32_t creator_thread_ = 0;
   uint32_t creator_lr_ = 0;
   std::unique_ptr<xe::threading::Event> event_;
+  // Parked cooperative waiters, so Pulse knows one will consume a set.
+  CooperativeWaiterFifo waiters_;
 };
 
 }  // namespace kernel

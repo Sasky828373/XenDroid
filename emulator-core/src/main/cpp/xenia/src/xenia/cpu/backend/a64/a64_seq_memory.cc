@@ -1346,9 +1346,9 @@ static const Xbyak_aarch64::XReg& LoadBackendCtxPtr(A64Emitter& e) {
 }
 
 // Two paths, selected by a64_native_reserved_ops:
-//  - Software (cvar off): RESERVED_LOAD/STORE call host helpers that keep a
-//    global per-block bitmap, so a stwcx. on one thread invalidates concurrent
-//    lwarx reservations on others.
+//  - Software (cvar off): RESERVED_LOAD/STORE call host helpers that share a
+//    per-granule generation counter, so a stwcx. on one thread invalidates
+//    concurrent lwarx reservations on others.
 //  - Native (cvar on, default): inline, no thunk. lwarx plain-loads the word,
 //    stashes it in cached_reserve_value_, and arms a per-thread reserve flag;
 //    stwcx. validates with one LSE CASAL. An EARLIER native design armed the
@@ -1359,6 +1359,10 @@ static const Xbyak_aarch64::XReg& LoadBackendCtxPtr(A64Emitter& e) {
 //    succeeds and the guest retry loop livelocks (hung Forza Horizon). The CAS
 //    is a single atomic with no such window. The guest byte-swap is a separate
 //    HIR op on both paths, so the captured/compared value is the raw word.
+//    Upstream's caveat applies to the native path: comparing the cached
+//    value cannot see an ABA where another thread writes and restores the
+//    word between the guest's lwarx and stwcx.; the software path's
+//    generation counter does catch that.
 struct RESERVED_LOAD_I32
     : Sequence<RESERVED_LOAD_I32, I<OPCODE_RESERVED_LOAD, I32Op, I64Op>> {
   static void Emit(A64Emitter& e, const EmitArgType& i) {

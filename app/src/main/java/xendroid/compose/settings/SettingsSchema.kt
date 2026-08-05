@@ -88,7 +88,8 @@ object SettingsSchema {
             b("Kernel", "guest_scheduler", "Guest scheduler (cooperative fibers)", true),
             // Timeslice a fiber may run before yielding at its next JIT safepoint.
             // Only meaningful with the guest scheduler on.
-            i("Kernel", "guest_scheduler_quantum_us", "Guest scheduler quantum (us)", 1000, 100, 8000),
+            i("Kernel", "guest_scheduler_quantum_us", "Guest scheduler quantum (us)", 1000, 250, 8000),
+            b("Kernel", "guest_scheduler_stats", "Guest scheduler stats logging", false),
             b("Logging", "log_high_frequency_kernel_calls", "Log high-frequency kernel calls", false),
             l("Kernel", "kernel_display_gamma_type", "Display gamma type", "2",
                 "0" to "linear", "1" to "sRGB (CRT)", "2" to "BT.709 (HDTV)"),

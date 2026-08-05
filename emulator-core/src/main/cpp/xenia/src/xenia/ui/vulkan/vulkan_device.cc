@@ -1242,6 +1242,25 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
     if (memory_type_flags & VK_MEMORY_PROPERTY_HOST_CACHED_BIT) {
       device->memory_types_.host_cached |= memory_type_bit;
     }
+    XELOGI(
+        "Vulkan memory type {}: {}{}{}{}{}heap {}", memory_type_index,
+        (memory_type_flags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)
+            ? "DEVICE_LOCAL "
+            : "",
+        (memory_type_flags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT)
+            ? "HOST_VISIBLE "
+            : "",
+        (memory_type_flags & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)
+            ? "HOST_COHERENT "
+            : "",
+        (memory_type_flags & VK_MEMORY_PROPERTY_HOST_CACHED_BIT)
+            ? "HOST_CACHED "
+            : "",
+        (memory_type_flags & VK_MEMORY_PROPERTY_LAZILY_ALLOCATED_BIT)
+            ? "LAZILY_ALLOCATED "
+            : "",
+        memory_properties.memoryTypes[memory_type_index].heapIndex);
+
     // Detect ReBAR/SAM memory (both device-local and host-visible)
     if ((memory_type_flags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) &&
         (memory_type_flags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT)) {

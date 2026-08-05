@@ -7,6 +7,8 @@
 ******************************************************************************
 */
 
+#include <atomic>
+
 #include "xenia/apu/xma_context_new.h"
 #include "xenia/apu/xma_helpers.h"
 
@@ -963,6 +965,12 @@ bool XmaContextNew::DecodePacket(AVCodecContext* av_context,
 void XmaContextNew::StoreContextMerged(const XMA_CONTEXT_DATA& data,
                                        const XMA_CONTEXT_DATA& initial_data,
                                        uint8_t* context_ptr) {
+  // The guest mixer polls output_buffer_write_offset from another thread and
+  // then reads the PCM behind it. Publish the ring writes before the offset:
+  // without this, weakly ordered CPUs can expose the new offset ahead of the
+  // samples and the game mixes stale data. x86 never shows this (TSO).
+  std::atomic_thread_fence(std::memory_order_release);
+
   XMA_CONTEXT_DATA fresh(context_ptr);
 
   // DWORD 0: decoder owns loop_count, output_buffer_write_offset.

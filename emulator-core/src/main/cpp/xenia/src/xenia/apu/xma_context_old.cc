@@ -7,6 +7,8 @@
 ******************************************************************************
 */
 
+#include <atomic>
+
 #include "xenia/apu/xma_context_old.h"
 
 #include <cstring>
@@ -103,6 +105,9 @@ bool XmaContextOld::Work() {
     auto context_ptr = memory()->TranslateVirtual(guest_ptr());
     XMA_CONTEXT_DATA data(context_ptr);
     Decode(&data);
+    // Publish the decoded ring writes before the offsets, see
+    // XmaContextNew::StoreContextMerged.
+    std::atomic_thread_fence(std::memory_order_release);
     data.Store(context_ptr);
     return true;
   }
@@ -120,6 +125,9 @@ void XmaContextOld::Enable() {
                                      : data.input_buffer_1_packet_count) *
                kBitsPerPacket);
 
+  // Publish the decoded ring writes before the offsets, see
+  // XmaContextNew::StoreContextMerged.
+  std::atomic_thread_fence(std::memory_order_release);
   data.Store(context_ptr);
 
   set_is_enabled(true);
@@ -145,6 +153,9 @@ void XmaContextOld::Clear() {
   split_frame_len_partial_ = 0;
   split_frame_padding_start_ = 0;
 
+  // Publish the decoded ring writes before the offsets, see
+  // XmaContextNew::StoreContextMerged.
+  std::atomic_thread_fence(std::memory_order_release);
   data.Store(context_ptr);
 }
 

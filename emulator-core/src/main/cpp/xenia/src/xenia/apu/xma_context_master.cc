@@ -7,6 +7,8 @@
 ******************************************************************************
 */
 
+#include <atomic>
+
 #include "xenia/apu/xma_context_master.h"
 
 #include <cstring>
@@ -103,6 +105,9 @@ bool XmaContextMaster::Work() {
   auto context_ptr = memory()->TranslateVirtual(guest_ptr());
   XMA_CONTEXT_DATA data(context_ptr);
   Decode(&data);
+  // Publish the decoded ring writes before the offsets, see
+  // XmaContextNew::StoreContextMerged.
+  std::atomic_thread_fence(std::memory_order_release);
   data.Store(context_ptr);
   return true;
 }
@@ -119,6 +124,9 @@ void XmaContextMaster::Enable() {
                                      : data.input_buffer_1_packet_count) *
                kBitsPerPacket);
 
+  // Publish the decoded ring writes before the offsets, see
+  // XmaContextNew::StoreContextMerged.
+  std::atomic_thread_fence(std::memory_order_release);
   data.Store(context_ptr);
 
   set_is_enabled(true);
@@ -138,6 +146,9 @@ void XmaContextMaster::Clear() {
   data.output_buffer_read_offset = 0;
   data.output_buffer_write_offset = 0;
 
+  // Publish the decoded ring writes before the offsets, see
+  // XmaContextNew::StoreContextMerged.
+  std::atomic_thread_fence(std::memory_order_release);
   data.Store(context_ptr);
 }
 

@@ -70,7 +70,8 @@ bool XmaContextFake::Work() {
   }
 
   std::lock_guard<xe_mutex> lock(lock_);
-  set_is_enabled(false);
+  // Consumes the arm and snapshots the kick it services.
+  ConsumeKick();
 
   auto context_ptr = memory()->TranslateVirtual(guest_ptr());
   XMA_CONTEXT_DATA data(context_ptr);

@@ -231,7 +231,8 @@ void XmaDecoder::WorkerThreadMain() {
     for (uint32_t n = 0; n < kContextCount; n++) {
       bool worked = contexts_[n]->Work();
       if (worked) {
-        contexts_[n]->SignalWorkDone();
+        // After Work() wrote the guest-visible context data back.
+        contexts_[n]->CompleteConsumedKick();
         if (measure) {
           ++worked_contexts;
         }
@@ -329,6 +330,9 @@ void XmaDecoder::ReleaseContext(uint32_t guest_ptr) {
   XmaContext& context = *contexts_[context_id];
   assert_true(context.is_allocated());
   context.Release();
+  // Release takes lock_, so no Work() is in flight; free any waiter that
+  // kicked this context just before the guest tore it down.
+  context.CancelPendingKicks();
   context_bitmap_.Release(context_id);
 }
 
@@ -395,24 +399,29 @@ void XmaDecoder::WriteRegister(uint32_t addr, uint32_t value) {
     // The context ID is a bit in the range of the entire context array.
     const uint32_t base_context_id = (r - XmaRegister::Context0Kick) * 32;
     const uint32_t kicked_value = value;
+    const bool dedicated = cvars::use_dedicated_xma_thread;
+    // One sequence per kicked context, so each wait below is satisfied only by
+    // its own kick being serviced or cancelled.
+    uint64_t kick_seqs[32] = {};
     while (value) {
       const uint32_t context_id = base_context_id + std::countr_zero(value);
       auto& context = *contexts_[context_id];
-      context.Enable();
-      if (!cvars::use_dedicated_xma_thread) {
-        context.Work();
+      kick_seqs[context_id - base_context_id] = context.BeginKick();
+      if (!dedicated) {
+        if (context.Work()) {
+          context.CompleteConsumedKick();
+        }
       }
       value &= value - 1;
     }
     // Signal the decoder thread to start processing.
     work_event_->SetBoostPriority();
-    if (cvars::use_dedicated_xma_thread) {
+    if (dedicated) {
       // Block until the worker finishes, so the game sees updated context data.
       uint32_t remaining = kicked_value;
       while (remaining) {
-        const uint32_t context_id =
-            base_context_id + std::countr_zero(remaining);
-        contexts_[context_id]->WaitForWorkDone();
+        const uint32_t bit = std::countr_zero(remaining);
+        contexts_[base_context_id + bit]->WaitForKick(kick_seqs[bit]);
         remaining &= remaining - 1;
       }
     }
@@ -427,6 +436,9 @@ void XmaDecoder::WriteRegister(uint32_t addr, uint32_t value) {
       context.Disable();
       // Ensure the worker isn't mid-processing this context.
       context.Block(false);
+      // A kick this Lock just disarmed will never be serviced, so resolve it
+      // here or its kicking thread waits for a later kick's completion.
+      context.CancelPendingKicks();
       value &= value - 1;
     }
   } else if (r >= XmaRegister::Context0Clear &&
@@ -438,6 +450,7 @@ void XmaDecoder::WriteRegister(uint32_t addr, uint32_t value) {
       const uint32_t context_id = base_context_id + std::countr_zero(value);
       auto& context = *contexts_[context_id];
       context.Clear();
+      context.CancelPendingKicks();
       value &= value - 1;
     }
   } else {

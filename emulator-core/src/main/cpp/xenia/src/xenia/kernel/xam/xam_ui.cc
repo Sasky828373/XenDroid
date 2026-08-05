@@ -35,6 +35,8 @@ DEFINE_bool(storage_selection_dialog, false,
 
 DECLARE_int32(license_mask);
 
+constexpr std::chrono::milliseconds kUIDelayMillis(200);
+
 namespace xe {
 namespace kernel {
 namespace xam {
@@ -82,8 +84,11 @@ X_RESULT xeXamDispatchDialog(T* dialog,
     return result;
   };
   auto post = []() {
-    xe::threading::Sleep(std::chrono::milliseconds(100));
-    kernel_state()->BroadcastNotification(kXNotificationSystemUI, false);
+    std::jthread t([] {
+      xe::threading::Sleep(kUIDelayMillis);
+      kernel_state()->BroadcastNotification(kXNotificationSystemUI, false);
+    });
+    t.detach();
   };
   if (!overlapped) {
     pre();
@@ -124,7 +129,7 @@ X_RESULT xeXamDispatchDialogEx(
     return result;
   };
   auto post = []() {
-    xe::threading::Sleep(std::chrono::milliseconds(100));
+    xe::threading::Sleep(kUIDelayMillis);
     kernel_state()->BroadcastNotification(kXNotificationSystemUI, false);
   };
   if (!overlapped) {
@@ -144,10 +149,15 @@ X_RESULT xeXamDispatchHeadless(std::function<X_RESULT()> run_callback,
                                uint32_t overlapped) {
   auto pre = []() {
     kernel_state()->BroadcastNotification(kXNotificationSystemUI, true);
+    xe::threading::Sleep(std::chrono::milliseconds(25));
   };
   auto post = []() {
-    xe::threading::Sleep(std::chrono::milliseconds(100));
-    kernel_state()->BroadcastNotification(kXNotificationSystemUI, false);
+    std::jthread t([]() {
+      xe::threading::Sleep(kUIDelayMillis);
+      kernel_state()->BroadcastNotification(kXNotificationSystemUI, false);
+    });
+
+    t.detach();
   };
   if (!overlapped) {
     pre();
@@ -168,7 +178,7 @@ X_RESULT xeXamDispatchHeadlessEx(
     kernel_state()->BroadcastNotification(kXNotificationSystemUI, true);
   };
   auto post = []() {
-    xe::threading::Sleep(std::chrono::milliseconds(100));
+    xe::threading::Sleep(kUIDelayMillis);
     kernel_state()->BroadcastNotification(kXNotificationSystemUI, false);
   };
   if (!overlapped) {
@@ -250,7 +260,7 @@ X_RESULT xeXamDispatchDialogAsync(T* dialog,
     kernel_state()->xam_state()->xam_dialogs_shown_--;
 
     auto run = []() -> void {
-      xe::threading::Sleep(std::chrono::milliseconds(100));
+      xe::threading::Sleep(kUIDelayMillis);
       kernel_state()->BroadcastNotification(kXNotificationSystemUI, false);
     };
 
@@ -272,7 +282,7 @@ X_RESULT xeXamDispatchHeadlessAsync(std::function<void()> run_callback) {
     kernel_state()->xam_state()->xam_dialogs_shown_--;
 
     auto run = []() -> void {
-      xe::threading::Sleep(std::chrono::milliseconds(100));
+      xe::threading::Sleep(kUIDelayMillis);
       kernel_state()->BroadcastNotification(kXNotificationSystemUI, false);
     };
 

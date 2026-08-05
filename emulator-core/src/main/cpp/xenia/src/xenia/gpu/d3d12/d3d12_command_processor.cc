@@ -410,6 +410,7 @@ ID3D12Resource* D3D12CommandProcessor::RequestScratchGPUBuffer(
     XELOGE("Failed to create a {} MB scratch GPU buffer", size >> 20);
     return nullptr;
   }
+  buffer->SetName(L"Scratch GPU Buffer");
   if (scratch_buffer_ != nullptr) {
     resources_for_deletion_.emplace_back(GetCurrentSubmission(),
                                          scratch_buffer_);
@@ -3367,6 +3368,7 @@ bool D3D12CommandProcessor::IssueCopy_ReadbackResolvePath() {
               GetCurrentSubmission(), resolve_downscale_buffer_.Detach());
         }
         resolve_downscale_buffer_.Attach(buffer);
+        resolve_downscale_buffer_->SetName(L"Resolve Downscale Buffer");
         resolve_downscale_buffer_size_ = downscale_buffer_size;
       } else {
         XELOGE("Failed to create {} MB resolve downscale buffer",
@@ -4044,6 +4046,11 @@ bool D3D12CommandProcessor::EndSubmission(bool is_swap) {
     // Queue operations done directly (like UpdateTileMappings) will be awaited
     // alongside the last submission if needed.
     queue_operations_done_since_submission_signal_ = false;
+
+    // Flush debug-layer messages per submission.
+    if (cvars::d3d12_debug) {
+      provider.LogD3D12DebugMessages();
+    }
   }
 
   if (is_closing_frame) {
@@ -5008,6 +5015,7 @@ CommandProcessor::QueryOpenResult D3D12CommandProcessor::OpenZPDQuery(
   // Clear the slot here so a recycled index never inherits old counts.
   if (zpd_active_query_is_rov_) {
     zpd_host_query_pool_->ClearROVCounter(deferred_command_list_,
+                                          GetCurrentSubmission(),
                                           zpd_active_query_index_);
     return QueryOpenResult::kOpened;
   }
@@ -5155,8 +5163,8 @@ bool D3D12CommandProcessor::AwaitQueryResolve(ReportHandle report_handle,
 }
 
 void D3D12CommandProcessor::RecordZPDResolveBatch() {
-  zpd_host_query_pool_->FlushResolveBatch(deferred_command_list_,
-                                          submission_open_);
+  zpd_host_query_pool_->FlushResolveBatch(
+      deferred_command_list_, GetCurrentSubmission(), submission_open_);
 }
 
 void D3D12CommandProcessor::WriteGammaRampSRV(

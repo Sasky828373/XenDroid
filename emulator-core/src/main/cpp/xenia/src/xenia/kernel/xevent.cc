@@ -134,10 +134,9 @@ int32_t XEvent::Pulse(uint32_t priority_increment, bool wait) {
     Set(priority_increment, wait);
     return old_signal_state;
   }
-  if (manual_reset_ && waiters_.HasWaiters()) {
-    // Satisfy-all-then-reset is not emulated cooperatively, those waiters
-    // miss this pulse.
-    XELOGW("XEvent::Pulse: manual-reset pulse with parked fiber waiters");
+  if (manual_reset_) {
+    // Releases every waiter parked right now. Must precede the wake below.
+    pulse_epoch_.fetch_add(1);
   }
   event_->Pulse();
   // Pulse leaves the event reset after releasing waiters.
@@ -164,6 +163,12 @@ void XEvent::WaitCallback() {
 void XEvent::CooperativeWaitBegin(XThread* thread) { waiters_.Add(thread); }
 
 void XEvent::CooperativeWaitEnd(XThread* thread) { waiters_.Remove(thread); }
+
+// An auto-reset set with a parked waiter belongs to the front of the queue.
+// NT wakes the first waiter directly, so a later poller must not steal it.
+bool XEvent::CooperativeMayAcquire(XThread* thread) {
+  return manual_reset_ || waiters_.MayAcquire(thread);
+}
 void XEvent::Query(uint32_t* out_type, uint32_t* out_state) {
   auto [type, state] = event_->Query();
 

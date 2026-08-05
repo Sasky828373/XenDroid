@@ -44,6 +44,8 @@ object SettingDescriptions {
         "gpu" to "Graphics backend to use for rendering (Vulkan or null)",
         "gpu_allow_invalid_fetch_constants" to "Tolerate invalid texture/vertex fetch constants instead of failing; works around errors in some games",
         "guest_display_refresh_cap" to "Cap vblanks at the console's 50/60Hz rate; off lets the game run as fast as possible",
+        "guest_scheduler" to "Run guest threads as cooperative fibers on a few host threads instead of one thread each; takes effect next launch",
+        "guest_scheduler_quantum_us" to "How long a guest thread runs before yielding to another; lower is fairer but switches more often",
         "half_pixel_offset" to "Emulate the console's half-pixel offset; correct for most games, off may fix slight UI blur in a few",
         "headless" to "Suppresses in-game system dialogs, answering prompts automatically with defaults. Text-entry prompts are exempt while the Android keyboard setting is on",
         "hid" to "Input backend used for controllers; 'any' picks the first one available",

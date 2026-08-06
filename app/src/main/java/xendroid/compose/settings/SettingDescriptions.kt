@@ -62,6 +62,7 @@ object SettingDescriptions {
         "kernel_display_gamma_type" to "Display gamma curve reported to games; BT.709 best matches a 360 on an HDTV",
         "kernel_pix" to "Exposes the PIX GPU profiler interface to the game for debug captures",
         "license_mask" to "Content license mask: 0 = none, 1 = full-version license (unlocks XBLA trials), -1 = all",
+        "log_safepoint_pc" to "Records where each guest thread last reached a yield point, so a freeze report can say where a stuck thread actually is instead of only where it last called from. Slows the emulator slightly; turn on only when chasing a freeze",
         "log_delay_collapse_rejects" to "Logs each delay loop that the collapse looked at and turned down, with the reason. Diagnostic aid for working out why a game sees no benefit; noisy while a game is loading",
         "log_guest_driven_gpu_register_written_values" to "Log every GPU register write made by the guest (debug builds only)",
         "log_high_frequency_kernel_calls" to "Logs even very frequent kernel calls; extremely verbose and slows things down",

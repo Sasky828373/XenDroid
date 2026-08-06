@@ -215,6 +215,7 @@ object SettingsSchema {
             // Elides real guest wall time; turn off per-title if a game depends on it.
             b("CPU", "collapse_memory_delay_spins", "Collapse memory delay countdowns", true),
             b("CPU", "log_delay_collapse_rejects", "Log delay-collapse rejects", false),
+            b("CPU", "log_safepoint_pc", "Record safepoint addresses (wedge diagnosis)", false),
         )),
 
         SettingsCategory("Logging", listOf(

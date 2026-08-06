@@ -196,6 +196,22 @@ static void SpinBackoffParkThunk(void* /*ppc_context*/) {
   thread_local uint32_t consec = 0;
   thread_local int64_t last_ns = 0;
   thread_local int64_t ep_start_ns = 0;
+  if (cvars::guest_scheduler) {
+    // Cooperative path: host-parking would stall co-resident fibers (the NFS
+    // Most Wanted deadlock class) and host-spinning never runs the producer,
+    // which may be a fiber queued behind this one. Yield instead - ready-tail
+    // requeue guarantees co-resident progress.
+    if (auto* yield_handler = xe::cpu::backend::spin_backoff_yield_handler) {
+      yield_handler(nullptr);
+      return;
+    }
+    // Scheduler enabled but not started yet (early init), or a non-fiber
+    // caller: fall back to the cheap spin.
+    for (uint32_t n = 0; n < 8; ++n) {
+      __asm__ __volatile__("isb sy" ::: "memory");
+    }
+    return;
+  }
   const int64_t now_ns =
       std::chrono::duration_cast<std::chrono::nanoseconds>(
           std::chrono::steady_clock::now().time_since_epoch())
@@ -209,7 +225,7 @@ static void SpinBackoffParkThunk(void* /*ppc_context*/) {
     ep_start_ns = now_ns;
   }
   last_ns = now_ns;
-  if (cvars::guest_scheduler || ++consec < kSpinIters) {
+  if (++consec < kSpinIters) {
     for (uint32_t n = 0; n < 8; ++n) {
       __asm__ __volatile__("isb sy" ::: "memory");
     }

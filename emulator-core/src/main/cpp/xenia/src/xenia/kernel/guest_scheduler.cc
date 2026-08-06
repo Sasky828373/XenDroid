@@ -117,6 +117,25 @@ static void PreemptCurrentFiber(void* /*raw_context*/) {
                                                               forced_at_irql);
 }
 
+// Spin-backoff hook. A collapsed guest spin-wait calls this instead of
+// burning its dispatch CPU: the producer it waits on may be a fiber queued
+// behind the caller on this same thread, which only a yield can let run. A
+// plain voluntary yield, not a quantum end, so a preempted-at-head fiber
+// keeps its slice semantics.
+static void SpinBackoffYieldFiber(void* /*raw_context*/) {
+  XThread* self = XThread::GetCurrentFiberThread();
+  if (!self) {
+    // Guest code on a non-fiber thread (interpreter, early init).
+    for (uint32_t n = 0; n < 8; ++n) {
+#if XE_ARCH_ARM64
+      __asm__ __volatile__("isb sy" ::: "memory");
+#endif
+    }
+    return;
+  }
+  self->kernel_state()->guest_scheduler()->YieldCurrentThread(false);
+}
+
 // Raw host ticks per us for the watchdog's deadline math, 0 if unusable.
 static double CalibrateTicksPerUs() {
   // Median of three short samples. A single busy-spin sample can be stretched
@@ -176,6 +195,7 @@ void GuestScheduler::EnsureStarted() {
     return;
   }
   xe::cpu::backend::preempt_yield_handler = &PreemptCurrentFiber;
+  xe::cpu::backend::spin_backoff_yield_handler = &SpinBackoffYieldFiber;
   // Not in the ctor, which runs before per-title cvar overrides are applied.
   double ticks_per_us = CalibrateTicksPerUs();
   ticks_per_us_ = ticks_per_us;

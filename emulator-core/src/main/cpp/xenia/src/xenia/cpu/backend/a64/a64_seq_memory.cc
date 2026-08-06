@@ -257,6 +257,23 @@ struct SPIN_BACKOFF
       // Adaptive spin-then-park (see SpinBackoffParkThunk): cheap for short
       // waits, a real short sleep for long ones. CallNativeSafe preserves guest
       // context across the (possibly sleeping) helper.
+      //
+      // The helper only yields the fiber, a no-op unless something else is
+      // runnable, but the call is a full guest->host thunk (28 Q-regs, 464 B
+      // frame) plus a thread_local lookup. Gate it on the scheduler's own
+      // give-way flag so the common case is two instructions.
+      if (cvars::guest_scheduler) {
+        static_assert(offsetof(ppc::PPCContext, preempt_requested) < 4096);
+        Xbyak_aarch64::Label skip;
+        e.ldrb(e.w16, Xbyak_aarch64::ptr(
+                          e.GetContextReg(),
+                          static_cast<uint32_t>(offsetof(
+                              ppc::PPCContext, preempt_requested))));
+        e.cbz(e.w16, skip);
+        e.CallNativeSafe(reinterpret_cast<void*>(&SpinBackoffParkThunk));
+        e.L(skip);
+        return;
+      }
       e.CallNativeSafe(reinterpret_cast<void*>(&SpinBackoffParkThunk));
       return;
     }

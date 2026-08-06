@@ -33,9 +33,14 @@ android {
                 // keep the reports readable, and the runtime is pulled in by
                 // the linker flag below.
                 if (System.getenv('XENDROID_HWASAN') == 'true') {
-                    cFlags '-O1', '-g', '-fno-strict-aliasing',
+                    // -DNDEBUG as in the normal build: without it every
+                    // assert_always becomes live, and the emulator has
+                    // assertions that a shipping build deliberately runs past.
+                    // The point here is to change memory checking, not program
+                    // semantics.
+                    cFlags '-O1', '-DNDEBUG', '-g', '-fno-strict-aliasing',
                            '-fsanitize=hwaddress', '-fno-omit-frame-pointer'
-                    cppFlags '-O1', '-g', '-fno-strict-aliasing',
+                    cppFlags '-O1', '-DNDEBUG', '-g', '-fno-strict-aliasing',
                              '-fsanitize=hwaddress', '-fno-omit-frame-pointer'
                     arguments '-DANDROID_SANITIZE=hwaddress',
                               '-DCMAKE_SHARED_LINKER_FLAGS=-fsanitize=hwaddress',

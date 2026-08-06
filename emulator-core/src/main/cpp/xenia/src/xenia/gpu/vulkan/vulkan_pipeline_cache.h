@@ -103,6 +103,12 @@ class VulkanPipelineCache : public GuestSpirvShaderCache::Host {
     // (starts at the minimal layout from untranslated shaders, upgraded to the
     // real one by the creation thread) - the atomic serves both async models.
     std::atomic<const PipelineLayoutProvider*> pipeline_layout;
+    // True while pipeline_layout still holds the minimal layout computed from
+    // shaders whose bindings weren't ready at insertion. Shaders can become
+    // ready before this entry's own job runs, so cache hits re-check and
+    // upgrade on the draw thread - otherwise a draw in that window allocates
+    // texture descriptors from a zero-binding layout.
+    std::atomic<bool> pipeline_layout_stale{false};
     // Pre-mapped dynamic-state values for this pipeline (see DynamicState).
     DynamicState dynamic_state;
 
@@ -131,6 +137,8 @@ class VulkanPipelineCache : public GuestSpirvShaderCache::Host {
         : pipeline(other.pipeline.load(std::memory_order_acquire)),
           pipeline_layout(
               other.pipeline_layout.load(std::memory_order_acquire)),
+          pipeline_layout_stale(
+              other.pipeline_layout_stale.load(std::memory_order_acquire)),
           dynamic_state(other.dynamic_state),
           is_placeholder(other.is_placeholder.load(std::memory_order_acquire)),
           uses_interpreter(
@@ -143,6 +151,8 @@ class VulkanPipelineCache : public GuestSpirvShaderCache::Host {
         : pipeline(other.pipeline.load(std::memory_order_acquire)),
           pipeline_layout(
               other.pipeline_layout.load(std::memory_order_acquire)),
+          pipeline_layout_stale(
+              other.pipeline_layout_stale.load(std::memory_order_acquire)),
           dynamic_state(other.dynamic_state),
           is_placeholder(other.is_placeholder.load(std::memory_order_acquire)),
           uses_interpreter(
@@ -450,8 +460,17 @@ class VulkanPipelineCache : public GuestSpirvShaderCache::Host {
   // Guest graphics pipeline layout for the given (translated) shaders. Binding
   // counts come from translation, so untranslated shaders yield the minimal
   // no-texture layout used by the interpreter placeholder. Thread-safe.
+  // counts_complete_out (optional) reports whether every consulted shader had
+  // its bindings ready, i.e. whether the returned layout is the real one.
   const PipelineLayoutProvider* GetGuestGraphicsPipelineLayout(
       const VulkanShader::VulkanTranslation* vertex_shader,
+      const VulkanShader::VulkanTranslation* pixel_shader,
+      bool* counts_complete_out = nullptr);
+  // Upgrades a cache-hit pipeline's layout on the draw thread once its
+  // shaders' bindings are ready, closing the window between translation
+  // finishing and the entry's own creation job running.
+  void RefreshPipelineLayoutIfStale(
+      Pipeline& pipeline, const VulkanShader::VulkanTranslation* vertex_shader,
       const VulkanShader::VulkanTranslation* pixel_shader);
 
   void WritePipelineRenderTargetDescription(

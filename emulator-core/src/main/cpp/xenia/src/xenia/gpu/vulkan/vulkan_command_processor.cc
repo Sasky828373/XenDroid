@@ -3506,9 +3506,11 @@ VulkanCommandProcessor::GetPipelineLayout(size_t texture_count_pixel,
   }
   auto emplaced_pair = pipeline_layouts_.emplace(
       std::piecewise_construct, std::forward_as_tuple(pipeline_layout_key),
-      std::forward_as_tuple(pipeline_layout,
-                            descriptor_set_layout_textures_vertex,
-                            descriptor_set_layout_textures_pixel));
+      std::forward_as_tuple(
+          pipeline_layout, descriptor_set_layout_textures_vertex,
+          descriptor_set_layout_textures_pixel, uint32_t(texture_count_vertex),
+          uint32_t(sampler_count_vertex), uint32_t(texture_count_pixel),
+          uint32_t(sampler_count_pixel)));
   // unordered_map insertion doesn't invalidate element references.
   return &emplaced_pair.first->second;
 }
@@ -7960,6 +7962,32 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
       (texture_count_pixel || sampler_count_pixel) &&
       !(current_graphics_descriptor_set_values_up_to_date_ &
         (UINT32_C(1) << SpirvShaderTranslator::kDescriptorSetTexturesPixel));
+  // Texture sets are allocated from the pipeline layout, so its baked counts
+  // must match the writes below. A mismatch means the pipeline still carries
+  // the minimal layout from untranslated shaders, and writing into the
+  // resulting zero-binding set crashes the driver. Fail the draw instead.
+  if ((write_vertex_textures &&
+       (current_guest_graphics_pipeline_layout_->texture_count_vertex() !=
+            texture_count_vertex ||
+        current_guest_graphics_pipeline_layout_->sampler_count_vertex() !=
+            sampler_count_vertex)) ||
+      (write_pixel_textures &&
+       (current_guest_graphics_pipeline_layout_->texture_count_pixel() !=
+            texture_count_pixel ||
+        current_guest_graphics_pipeline_layout_->sampler_count_pixel() !=
+            sampler_count_pixel))) {
+    XELOGE(
+        "UpdateBindings: pipeline layout counts (VS {}t/{}s, PS {}t/{}s) do "
+        "not match the draw's binding counts (VS {}t/{}s, PS {}t/{}s) - "
+        "skipping the draw",
+        current_guest_graphics_pipeline_layout_->texture_count_vertex(),
+        current_guest_graphics_pipeline_layout_->sampler_count_vertex(),
+        current_guest_graphics_pipeline_layout_->texture_count_pixel(),
+        current_guest_graphics_pipeline_layout_->sampler_count_pixel(),
+        texture_count_vertex, sampler_count_vertex, texture_count_pixel,
+        sampler_count_pixel);
+    return false;
+  }
   // When a needed texture set is skipped (not re-written this draw), the cached
   // VkDescriptorSet must still be a real, allocated set - never the frame-open
   // VK_NULL_HANDLE memset value - or the bind loop below would bind a null

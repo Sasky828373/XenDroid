@@ -576,31 +576,64 @@ bool VulkanPipelineCache::CanCreatePipelineAsync(bool has_pixel_shader) const {
 const VulkanPipelineCache::PipelineLayoutProvider*
 VulkanPipelineCache::GetGuestGraphicsPipelineLayout(
     const VulkanShader::VulkanTranslation* vertex_shader,
-    const VulkanShader::VulkanTranslation* pixel_shader) {
+    const VulkanShader::VulkanTranslation* pixel_shader,
+    bool* counts_complete_out) {
   // Binding counts come from translation. A shader whose bindings aren't ready
   // yet (being translated on a creation thread) reports 0 - reading its binding
   // vectors here would race the creation thread populating them. That yields
-  // the minimal layout; the creation thread recomputes the real one once ready.
+  // the minimal layout, and counts_complete_out reports false so the caller
+  // can mark the layout for a later upgrade. bindings_ready() is monotonic, so
+  // a false read can only under-report (never claim real counts it didn't
+  // use).
+  bool counts_complete = true;
   auto texture_count =
-      [](const VulkanShader::VulkanTranslation* translation) -> size_t {
+      [&counts_complete](
+          const VulkanShader::VulkanTranslation* translation) -> size_t {
     const VulkanShader& shader =
         static_cast<const VulkanShader&>(translation->shader());
-    return shader.bindings_ready()
-               ? shader.GetTextureBindingsAfterTranslation().size()
-               : 0;
+    if (!shader.bindings_ready()) {
+      counts_complete = false;
+      return 0;
+    }
+    return shader.GetTextureBindingsAfterTranslation().size();
   };
   auto sampler_count =
-      [](const VulkanShader::VulkanTranslation* translation) -> size_t {
+      [&counts_complete](
+          const VulkanShader::VulkanTranslation* translation) -> size_t {
     const VulkanShader& shader =
         static_cast<const VulkanShader&>(translation->shader());
-    return shader.bindings_ready()
-               ? shader.GetSamplerBindingsAfterTranslation().size()
-               : 0;
+    if (!shader.bindings_ready()) {
+      counts_complete = false;
+      return 0;
+    }
+    return shader.GetSamplerBindingsAfterTranslation().size();
   };
-  return command_processor_.GetPipelineLayout(
+  const PipelineLayoutProvider* layout = command_processor_.GetPipelineLayout(
       pixel_shader ? texture_count(pixel_shader) : 0,
       pixel_shader ? sampler_count(pixel_shader) : 0,
       texture_count(vertex_shader), sampler_count(vertex_shader));
+  if (counts_complete_out) {
+    *counts_complete_out = counts_complete;
+  }
+  return layout;
+}
+
+void VulkanPipelineCache::RefreshPipelineLayoutIfStale(
+    Pipeline& pipeline, const VulkanShader::VulkanTranslation* vertex_shader,
+    const VulkanShader::VulkanTranslation* pixel_shader) {
+  if (!pipeline.pipeline_layout_stale.load(std::memory_order_acquire)) {
+    return;
+  }
+  bool counts_complete;
+  const PipelineLayoutProvider* layout =
+      GetGuestGraphicsPipelineLayout(vertex_shader, pixel_shader,
+                                     &counts_complete);
+  if (layout && counts_complete) {
+    // The creation job may store the same layout concurrently - the providers
+    // are cached per count key, so both threads store an identical pointer.
+    pipeline.pipeline_layout.store(layout, std::memory_order_release);
+    pipeline.pipeline_layout_stale.store(false, std::memory_order_release);
+  }
 }
 
 bool VulkanPipelineCache::ConfigurePipeline(
@@ -638,12 +671,15 @@ bool VulkanPipelineCache::ConfigurePipeline(
   CanonicalizePipelineDescription(description);
   if (last_pipeline_ && last_pipeline_->first == description) {
     last_pipeline_->second.dynamic_state = dynamic_state;
+    RefreshPipelineLayoutIfStale(last_pipeline_->second, vertex_shader,
+                                 pixel_shader);
     *pipeline_out = &last_pipeline_->second;
     return true;
   }
   auto it = pipelines_.find(description);
   if (it != pipelines_.end()) {
     it->second.dynamic_state = dynamic_state;
+    RefreshPipelineLayoutIfStale(it->second, vertex_shader, pixel_shader);
     last_pipeline_ = &*it;
     *pipeline_out = &it->second;
     return true;
@@ -651,10 +687,13 @@ bool VulkanPipelineCache::ConfigurePipeline(
 
   // Create the pipeline if not the latest and not already existing. For an
   // interpreter placeholder the shaders aren't translated yet, so their binding
-  // counts read as 0 and this yields the minimal (no-texture) layout - the
-  // creation thread upgrades it to the real layout after translation.
+  // counts read as 0 and this yields the minimal (no-texture) layout - it is
+  // upgraded to the real layout by the creation thread after translation, or
+  // by RefreshPipelineLayoutIfStale on an earlier cache hit.
+  bool layout_counts_complete;
   const PipelineLayoutProvider* pipeline_layout =
-      GetGuestGraphicsPipelineLayout(vertex_shader, pixel_shader);
+      GetGuestGraphicsPipelineLayout(vertex_shader, pixel_shader,
+                                     &layout_counts_complete);
   if (!pipeline_layout) {
     return false;
   }
@@ -684,6 +723,8 @@ bool VulkanPipelineCache::ConfigurePipeline(
   auto& pipeline_pair =
       *pipelines_.emplace(description, Pipeline(pipeline_layout)).first;
   pipeline_pair.second.dynamic_state = dynamic_state;
+  pipeline_pair.second.pipeline_layout_stale.store(!layout_counts_complete,
+                                                   std::memory_order_release);
 
   if (storage_writer_.is_active()) {
     VulkanShader& vs = static_cast<VulkanShader&>(vertex_shader->shader());
@@ -844,6 +885,8 @@ bool VulkanPipelineCache::ConfigurePipeline(
         }
         pipeline_pair.second.pipeline_layout.store(real_layout,
                                                    std::memory_order_release);
+        pipeline_pair.second.pipeline_layout_stale.store(
+            false, std::memory_order_release);
       }
       if (!EnsurePipelineCreated(creation_arguments)) {
         return false;
@@ -1021,12 +1064,17 @@ void VulkanPipelineCache::CreationThread() {
       // placeholder, or drop-until-ready with no placeholder). Now that they're
       // translated, compute the real layout before creating the real pipeline.
       // Idempotent when the layout was already real (real-VS placeholder path).
-      const PipelineLayoutProvider* real_layout =
-          GetGuestGraphicsPipelineLayout(creation_arguments.vertex_shader,
-                                         creation_arguments.pixel_shader);
+      bool real_layout_counts_complete;
+      const PipelineLayoutProvider* real_layout = GetGuestGraphicsPipelineLayout(
+          creation_arguments.vertex_shader, creation_arguments.pixel_shader,
+          &real_layout_counts_complete);
       if (real_layout) {
         creation_arguments.pipeline->second.pipeline_layout.store(
             real_layout, std::memory_order_release);
+        if (real_layout_counts_complete) {
+          creation_arguments.pipeline->second.pipeline_layout_stale.store(
+              false, std::memory_order_release);
+        }
       }
       if (!EnsurePipelineCreated(creation_arguments)) {
         XELOGE("Failed to create Vulkan pipeline");

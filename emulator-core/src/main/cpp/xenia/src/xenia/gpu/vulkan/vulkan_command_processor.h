@@ -427,12 +427,18 @@ class VulkanCommandProcessor final : public CommandProcessor {
     explicit PipelineLayout(
         VkPipelineLayout pipeline_layout,
         VkDescriptorSetLayout descriptor_set_layout_textures_vertex_ref,
-        VkDescriptorSetLayout descriptor_set_layout_textures_pixel_ref)
+        VkDescriptorSetLayout descriptor_set_layout_textures_pixel_ref,
+        uint32_t texture_count_vertex, uint32_t sampler_count_vertex,
+        uint32_t texture_count_pixel, uint32_t sampler_count_pixel)
         : pipeline_layout_(pipeline_layout),
           descriptor_set_layout_textures_vertex_ref_(
               descriptor_set_layout_textures_vertex_ref),
           descriptor_set_layout_textures_pixel_ref_(
-              descriptor_set_layout_textures_pixel_ref) {}
+              descriptor_set_layout_textures_pixel_ref),
+          texture_count_vertex_(texture_count_vertex),
+          sampler_count_vertex_(sampler_count_vertex),
+          texture_count_pixel_(texture_count_pixel),
+          sampler_count_pixel_(sampler_count_pixel) {}
     VkPipelineLayout GetPipelineLayout() const override {
       return pipeline_layout_;
     }
@@ -442,11 +448,21 @@ class VulkanCommandProcessor final : public CommandProcessor {
     VkDescriptorSetLayout descriptor_set_layout_textures_pixel_ref() const {
       return descriptor_set_layout_textures_pixel_ref_;
     }
+    // The binding counts the texture set layouts were built for - lets the
+    // draw path verify a set allocation against the layout it will use.
+    uint32_t texture_count_vertex() const { return texture_count_vertex_; }
+    uint32_t sampler_count_vertex() const { return sampler_count_vertex_; }
+    uint32_t texture_count_pixel() const { return texture_count_pixel_; }
+    uint32_t sampler_count_pixel() const { return sampler_count_pixel_; }
 
    private:
     VkPipelineLayout pipeline_layout_;
     VkDescriptorSetLayout descriptor_set_layout_textures_vertex_ref_;
     VkDescriptorSetLayout descriptor_set_layout_textures_pixel_ref_;
+    uint32_t texture_count_vertex_;
+    uint32_t sampler_count_vertex_;
+    uint32_t texture_count_pixel_;
+    uint32_t sampler_count_pixel_;
   };
 
   struct UsedSingleTransientDescriptor {

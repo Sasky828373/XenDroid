@@ -203,6 +203,8 @@ VulkanUploadBufferPool::CreatePageImplementation() {
     return nullptr;
   }
 
+  util::ResetSanitizerTags(mapping, allocation_size_);
+
   XELOGI("Vulkan upload pool {} (usage {:X}): page mapped at {}, {} bytes",
          static_cast<const void*>(this), uint32_t(usage_), mapping,
          uint64_t(allocation_size_));

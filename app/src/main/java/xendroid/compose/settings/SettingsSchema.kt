@@ -212,6 +212,9 @@ object SettingsSchema {
             b("CPU", "inline_mmio_access", "Inline MMIO access", true),
             b("CPU", "clock_no_scaling", "Clock no scaling", false),
             b("CPU", "disable_context_promotion", "Disable context promotion", false),
+            // Elides real guest wall time, so it stays per-title and opt-in.
+            b("CPU", "collapse_memory_delay_spins", "Collapse memory delay countdowns", false),
+            b("CPU", "log_delay_collapse_rejects", "Log delay-collapse rejects", false),
         )),
 
         SettingsCategory("Logging", listOf(

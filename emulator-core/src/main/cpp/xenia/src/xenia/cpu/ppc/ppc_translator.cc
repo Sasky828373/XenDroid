@@ -122,6 +122,16 @@ PPCTranslator::PPCTranslator(PPCFrontend* frontend) : frontend_(frontend) {
     compiler_->AddPass(std::make_unique<passes::ValidationPass>());
   }
 
+  // Collapse the memory-counter sibling of the above: delay countdowns whose
+  // counter was spilled to a stack slot instead of CTR. Runs on the same
+  // still-valid ControlFlowAnalysisPass edges, and must stay ahead of
+  // MemorySequenceCombinationPass, which fuses the byte swaps it models
+  // explicitly. cvar-gated, behaviour-neutral when off.
+  compiler_->AddPass(std::make_unique<passes::DelayCountdownCollapsePass>());
+  if (validate) {
+    compiler_->AddPass(std::make_unique<passes::ValidationPass>());
+  }
+
   if (backend->machine_info()->supports_extended_load_store) {
     // Backend supports the advanced LOAD/STORE instructions.
     // These will save us a lot of HIR opcodes.

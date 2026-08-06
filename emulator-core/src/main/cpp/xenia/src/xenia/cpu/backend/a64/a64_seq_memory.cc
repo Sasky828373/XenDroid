@@ -264,7 +264,7 @@ struct SPIN_BACKOFF
       // give-way flag so the common case is two instructions.
       if (cvars::guest_scheduler) {
         static_assert(offsetof(ppc::PPCContext, preempt_requested) < 4096);
-        Xbyak_aarch64::Label skip;
+        auto& skip = e.NewCachedLabel();
         e.ldrb(e.w16, Xbyak_aarch64::ptr(
                           e.GetContextReg(),
                           static_cast<uint32_t>(offsetof(
@@ -277,7 +277,7 @@ struct SPIN_BACKOFF
       e.CallNativeSafe(reinterpret_cast<void*>(&SpinBackoffParkThunk));
       return;
     }
-    Xbyak_aarch64::Label loop;
+    auto& loop = e.NewCachedLabel();
     e.mov(e.w16, count);
     e.L(loop);
     e.isb(Xbyak_aarch64::SY);

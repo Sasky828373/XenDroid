@@ -52,6 +52,18 @@ android {
         compose true
         buildConfig true
     }
+    // HWASan builds link against the shared sanitizer runtime, which has to
+    // ship inside the APK: the platform copy is not on a normal app's search
+    // path. Sourced from the NDK that compiled the code, so the runtime and
+    // the instrumentation always match.
+    if (System.getenv('XENDROID_HWASAN') == 'true') {
+        sourceSets {
+            debug {
+                jniLibs.srcDirs += "/tmp/claude-1000/-home-renato-Projects-XenDroid/118fdf35-d55f-4bb9-822c-6a48387914b5/scratchpad/hwasan-jni"
+            }
+        }
+    }
+
     packaging {
         // libe.so from :emulator-core is stored uncompressed (matches core).
         jniLibs.useLegacyPackaging = true

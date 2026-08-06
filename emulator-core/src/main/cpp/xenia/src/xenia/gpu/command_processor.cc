@@ -40,6 +40,17 @@ DEFINE_bool(
     "its own, just ones the guest makes or instructs it to make.",
     "GPU");
 
+DEFINE_uint32(
+    gpu_stall_spin_iterations, 32,
+    "How many times the command processor polls the ring buffer with a cheap "
+    "yield before parking on the write-pointer event when the guest has "
+    "produced no commands. The spin exists to dodge wake latency when the "
+    "guest is about to kick again immediately, but on ARM64 the yield is a "
+    "WFE that does not actually park on a busy SoC, so every iteration burns "
+    "a core at full clock. 0 parks immediately; the event is signalled by "
+    "UpdateWritePointer, so no wake-up is missed either way.",
+    "GPU");
+
 DEFINE_bool(disassemble_pm4, false,
             "Only does anything in debug builds, if set will disassemble and "
             "log all PM4 packets sent to the CP.",
@@ -671,7 +682,7 @@ void CommandProcessor::WorkerThreadMain() {
       uint32_t loop_count = 0;
       do {
         // If we spin around too much, revert to a "low-power" state.
-        if (loop_count > 500) {
+        if (loop_count > cvars::gpu_stall_spin_iterations) {
           constexpr int wait_time_ms = 2;
           xe::threading::Wait(write_ptr_index_event_.get(), true,
                               std::chrono::milliseconds(wait_time_ms));

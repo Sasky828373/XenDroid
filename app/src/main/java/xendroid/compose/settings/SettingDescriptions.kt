@@ -43,6 +43,7 @@ object SettingDescriptions {
         "force_convert_quad_lists_to_triangle_lists" to "Always convert quad lists to triangles on the CPU even when the GPU can draw them natively",
         "force_convert_triangle_fans_to_lists" to "Always convert triangle fans to triangle lists on the CPU even when the GPU supports fans",
         "gpu" to "Graphics backend to use for rendering (Vulkan or null)",
+        "gpu_stall_spin_iterations" to "How long the graphics thread busy-waits for the game to send more work before going to sleep. Lower frees up a CPU core and cuts heat; too low can add a little latency to each batch of drawing. 0 sleeps immediately",
         "gpu_allow_invalid_fetch_constants" to "Tolerate invalid texture/vertex fetch constants instead of failing; works around errors in some games",
         "guest_display_refresh_cap" to "Cap vblanks at the console's 50/60Hz rate; off lets the game run as fast as possible",
         "guest_scheduler" to "Run guest threads as cooperative fibers on a few host threads instead of one thread each; takes effect next launch",

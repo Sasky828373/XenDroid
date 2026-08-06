@@ -104,13 +104,17 @@ class PPCHIRBuilder : public hir::HIRBuilder {
   Instr** instr_offset_list_;
   Label** label_list_;
 
-  // Reset each instruction.
+  // Reset each instruction. Sized for what a single PowerPC instruction can
+  // write, so anything emitting a longer run of register stores from one
+  // instruction (an inlined helper, say) must not be allowed to run the
+  // counter past the end - see the guard in the Store*R helpers.
+  static constexpr uint32_t kMaxTraceDests = 4;
   struct {
     uint32_t dest_count;
     struct {
       uint8_t reg;
       Value* value;
-    } dests[4];
+    } dests[kMaxTraceDests];
   } trace_info_;
 };
 

@@ -23,6 +23,13 @@ DEFINE_bool(ignore_trap_instructions, true,
             "better performance in games that aggressively check with trap.",
             "CPU");
 
+DEFINE_uint32(
+    inline_gprlr_saverest_parts, 3,
+    "Bisect aid for inline_gprlr_saverest: bit 0 inlines the save helpers, "
+    "bit 1 the restore helpers. 3 = both, 0 = neither. Only consulted while "
+    "inline_gprlr_saverest itself is on.",
+    "CPU");
+
 DEFINE_bool(
     inline_gprlr_saverest, true,
     "Expand calls to the XDK __savegprlr_N/__restgprlr_N helpers inline "
@@ -64,7 +71,7 @@ static bool TryInlineGprlrSaverest(PPCHIRBuilder& f, uint64_t cia,
     return false;
   }
   Value* r1 = f.LoadGPR(1);
-  if (function->IsSave() && lk) {
+  if (function->IsSave() && lk && (cvars::inline_gprlr_saverest_parts & 1)) {
     // bl __savegprlr_N: LR <- cia+4 architecturally, though the real return
     // path goes through the r12 slot the restore reloads.
     for (int r = n; r <= 31; ++r) {
@@ -76,7 +83,8 @@ static bool TryInlineGprlrSaverest(PPCHIRBuilder& f, uint64_t cia,
     f.StoreLR(f.LoadConstantUint64(cia + 4));
     return true;
   }
-  if (function->IsRestore() && !lk) {
+  if (function->IsRestore() && !lk &&
+      (cvars::inline_gprlr_saverest_parts & 2)) {
     // b __restgprlr_N: reload the frame, then return through the restored LR
     // exactly as a translated blr would.
     for (int r = n; r <= 31; ++r) {

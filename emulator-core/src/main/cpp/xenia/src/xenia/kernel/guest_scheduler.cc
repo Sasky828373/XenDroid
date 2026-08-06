@@ -317,7 +317,7 @@ void GuestScheduler::Shutdown() {
       for (int prio = 0; prio < 32; ++prio) {
         drain(cpu.ready_head[prio], cpu.ready_tail[prio]);
       }
-      cpu.ready_summary = 0;
+      cpu.ready_summary.store(0, std::memory_order_relaxed);
       drain(cpu.blocked_head, cpu.blocked_tail);
       drain(cpu.suspended_head, cpu.suspended_tail);
       if (cpu.exited_thread) {
@@ -424,7 +424,7 @@ bool GuestScheduler::ParkSuspended(XThread* thread, int cpu_index) {
 }
 
 XThread* GuestScheduler::HighestReadyExcept(const Cpu& cpu, XThread* except) {
-  uint32_t summary = cpu.ready_summary;
+  uint32_t summary = cpu.ready_summary.load(std::memory_order_relaxed);
   while (summary) {
     int level = 31 - xe::lzcnt(summary);
     summary &= ~(uint32_t(1) << level);
@@ -443,7 +443,7 @@ XThread* GuestScheduler::HighestReadyExcept(const Cpu& cpu, XThread* except) {
 XThread* GuestScheduler::DequeueReady(int cpu_index) {
   std::lock_guard<std::mutex> lock(lock_);
   Cpu& cpu = cpus_[cpu_index];
-  if (cpu.ready_summary == 0) {
+  if (cpu.ready_summary.load(std::memory_order_relaxed) == 0) {
     return nullptr;
   }
   // Strict priority alone lets a high-priority yield-spinner deadlock on the
@@ -452,7 +452,8 @@ XThread* GuestScheduler::DequeueReady(int cpu_index) {
   cpu.yield_to_other = nullptr;
 
   // Highest set bit = highest ready priority.
-  int level = 31 - xe::lzcnt(cpu.ready_summary);
+  int level =
+      31 - xe::lzcnt(cpu.ready_summary.load(std::memory_order_relaxed));
   XThread* thread = cpu.ready_head[level];
   if (yielder && thread == yielder) {
     if (XThread* other = HighestReadyExcept(cpu, yielder)) {
@@ -461,7 +462,7 @@ XThread* GuestScheduler::DequeueReady(int cpu_index) {
       UnlinkLocked(cpu.ready_head[other_level], cpu.ready_tail[other_level],
                    other);
       if (!cpu.ready_head[other_level]) {
-        cpu.ready_summary &= ~(uint32_t(1) << other_level);
+        ClearReadyLevel(cpu, other_level);
       }
       auto& other_links = other->scheduler_links();
       other_links.ready_next = nullptr;
@@ -475,7 +476,7 @@ XThread* GuestScheduler::DequeueReady(int cpu_index) {
   cpu.ready_head[level] = links.ready_next;
   if (!cpu.ready_head[level]) {
     cpu.ready_tail[level] = nullptr;
-    cpu.ready_summary &= ~(uint32_t(1) << level);
+    ClearReadyLevel(cpu, level);
   }
   links.ready_next = nullptr;
   links.queued = false;
@@ -514,7 +515,9 @@ void GuestScheduler::LinkReadyLocked(Cpu& cpu, XThread* thread, bool at_head) {
   } else {
     LinkTailLocked(cpu.ready_head[prio], cpu.ready_tail[prio], thread);
   }
-  cpu.ready_summary |= uint32_t(1) << prio;
+  cpu.ready_summary.store(
+      cpu.ready_summary.load(std::memory_order_relaxed) | (uint32_t(1) << prio),
+      std::memory_order_relaxed);
   // Outranking the running fiber flags it, so its next JIT safepoint yields
   // and the dispatcher picks us.
   XThread* running = cpu.current_thread;
@@ -552,7 +555,7 @@ void GuestScheduler::RequeueForPriority(XThread* thread) {
   int old = links.queued_prio;
   UnlinkLocked(cpu.ready_head[old], cpu.ready_tail[old], thread);
   if (!cpu.ready_head[old]) {
-    cpu.ready_summary &= ~(uint32_t(1) << old);
+    ClearReadyLevel(cpu, old);
   }
   LinkReadyLocked(cpu, thread, false);
 }
@@ -569,7 +572,7 @@ bool GuestScheduler::ForgetThread(XThread* thread) {
       int prio = links.queued_prio;
       UnlinkLocked(cpu.ready_head[prio], cpu.ready_tail[prio], thread);
       if (!cpu.ready_head[prio]) {
-        cpu.ready_summary &= ~(uint32_t(1) << prio);
+        ClearReadyLevel(cpu, prio);
       }
     } else if (links.blocked) {
       UnlinkLocked(cpu.blocked_head, cpu.blocked_tail, thread);
@@ -612,7 +615,7 @@ bool GuestScheduler::TerminateThread(XThread* thread) {
           int prio = links.queued_prio;
           UnlinkLocked(cpu.ready_head[prio], cpu.ready_tail[prio], thread);
           if (!cpu.ready_head[prio]) {
-            cpu.ready_summary &= ~(uint32_t(1) << prio);
+            ClearReadyLevel(cpu, prio);
           }
         } else if (links.blocked) {
           UnlinkLocked(cpu.blocked_head, cpu.blocked_tail, thread);
@@ -793,6 +796,22 @@ bool GuestScheduler::YieldCurrentThread(bool quantum_end, bool to_lower) {
   ExitIfTerminated();
   XThread* self = XThread::GetCurrentThread();
   auto& links = self->scheduler_links();
+  // Nothing to yield to: skip the dispatcher round trip, which would otherwise
+  // enqueue and immediately resume this same fiber. Sleep(0) spin-waits drive
+  // this hundreds of thousands of times a second.
+  //
+  // Costs at most a quantum of latency - every condition below is re-armed
+  // elsewhere (ready_summary, repoll_now, preempt_requested, the watchdog).
+  // The reads are lock-free and may be stale; a stale "idle" just means the
+  // next call takes the slow path.
+  if (!quantum_end && !links.preempted && self->suspend_count() == 0 &&
+      !self->thread_state()->context()->preempt_requested) {
+    const Cpu& cpu = cpus_[t_current_cpu];
+    if (cpu.ready_summary.load(std::memory_order_relaxed) == 0 &&
+        !cpu.repoll_now.load(std::memory_order_relaxed)) {
+      return false;  // nothing else ran, which is exactly what we report
+    }
+  }
   // A slice cut short by a higher-priority thread is not a quantum end, that
   // thread re-runs at the head instead.
   if (quantum_end && !links.preempted) {
@@ -1228,7 +1247,7 @@ void GuestScheduler::RunLoop(int cpu_index) {
     {
       std::lock_guard<std::mutex> lock(lock_);
       have_blocked = cpu.blocked_head != nullptr;
-      have_work = cpu.ready_summary != 0 ||
+      have_work = cpu.ready_summary.load(std::memory_order_relaxed) != 0 ||
                   cpu.repoll_now.load(std::memory_order_relaxed);
     }
     if (have_work) {
@@ -1383,9 +1402,11 @@ void GuestScheduler::ReportNoProgress() {
           i, running->thread_id(), running->thread_name(),
           uint32_t(context->last_safepoint_pc), uint32_t(context->lr),
           uint32_t(kpcr->current_irql),
-          uint32_t(context->preempt_requested), cpu.ready_summary);
+          uint32_t(context->preempt_requested),
+          cpu.ready_summary.load(std::memory_order_relaxed));
     } else {
-      XELOGW("  CPU {} idle, ready_summary={:#x}", i, cpu.ready_summary);
+      XELOGW("  CPU {} idle, ready_summary={:#x}", i,
+             cpu.ready_summary.load(std::memory_order_relaxed));
     }
     // Parked fibers are the interesting half: the cycle is whatever they are
     // all waiting for.
@@ -1511,7 +1532,7 @@ void GuestScheduler::WatchdogLoop() {
           uint32_t(context->preempt_requested),
           running->scheduler_links().preempt_defers_irql,
           running->scheduler_links().preempt_defers_lock,
-          cpus_[i].ready_summary);
+          cpus_[i].ready_summary.load(std::memory_order_relaxed));
     }
   }
 }

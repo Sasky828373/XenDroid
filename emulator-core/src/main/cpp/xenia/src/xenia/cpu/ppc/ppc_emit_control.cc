@@ -24,11 +24,9 @@ DEFINE_bool(ignore_trap_instructions, true,
             "CPU");
 
 DEFINE_uint32(
-    inline_gprlr_saverest_parts, 7,
+    inline_gprlr_saverest_parts, 3,
     "Bisect aid for inline_gprlr_saverest: bit 0 inlines the save helpers, "
-    "bit 1 the restore helpers, bit 2 lets the inlined restore use the "
-    "possible-return fast path on its tail branch (clear it to force the "
-    "plain tail-call route). 7 = everything. Only consulted while "
+    "bit 1 the restore helpers. 3 = both. Only consulted while "
     "inline_gprlr_saverest itself is on.",
     "CPU");
 
@@ -98,11 +96,11 @@ static bool TryInlineGprlrSaverest(PPCHIRBuilder& f, uint64_t cia,
         INT64_TYPE);
     f.StoreGPR(12, ret);
     f.StoreLR(ret);
-    uint16_t flags = CALL_TAIL;
-    if (cvars::inline_gprlr_saverest_parts & 4) {
-      flags |= CALL_POSSIBLE_RETURN;
-    }
-    f.CallIndirect(ret, flags);
+    // POSSIBLE_RETURN is load-bearing, not an optimization: without it every
+    // return address goes through the indirection table, and each miss mints a
+    // new overlapping translation at that mid-function address - enough to
+    // overflow the code cache within seconds of boot.
+    f.CallIndirect(ret, CALL_TAIL | CALL_POSSIBLE_RETURN);
     return true;
   }
   return false;

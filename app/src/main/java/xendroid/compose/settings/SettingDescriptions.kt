@@ -24,7 +24,7 @@ object SettingDescriptions {
         "clear_memory_page_state" to "Refresh memory page state so GPU-written data is visible; off is slightly faster but may break rendering",
         "clock_no_scaling" to "Bypasses guest clock scaling and pulls time straight from the host; ignores time scalar",
         "clock_source_raw" to "Uses the raw CPU counter (CNTVCT) as the time source instead of OS clock calls",
-        "collapse_memory_delay_spins" to "Skips guest busy-wait delay loops that count a stack counter down to zero, jumping straight to the end state. Big CPU saving in games that use long delays, but it does shorten a real wait, so enable it per game. Takes effect next time a game starts",
+        "collapse_memory_delay_spins" to "Skips guest busy-wait delay loops that count a stack counter down to zero, jumping straight to the end state. Big CPU saving in games that use long delays. It does shorten a real wait, so turn it off for a game that misbehaves with it on. Takes effect next time a game starts",
         "depth_float24_convert_in_pixel_shader" to "Convert depth to 24-bit float in pixel shaders; fixes striped depth artifacts at some speed cost",
         "depth_float24_round" to "Round to nearest instead of truncating when converting depth to 24-bit float; off is recommended",
         "depth_transfer_not_equal_test" to "Skip rewriting unchanged depth during depth transfers to keep depth compression effective",

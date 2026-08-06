@@ -20,7 +20,7 @@
 #include "xenia/cpu/ppc/ppc_context.h"
 
 DEFINE_bool(
-    collapse_memory_delay_spins, false,
+    collapse_memory_delay_spins, true,
     "Collapse guest delay-countdown self-loops whose loop counter lives in "
     "memory (a stack slot) instead of CTR - `while (--*slot != 0) db16cyc...` - "
     "into one body pass, the exact exit state (slot = 0, flags as if the loop "
@@ -29,8 +29,8 @@ DEFINE_bool(
     "counter instead of using mtctr. Requires a delay_execution sled in the "
     "body as proof of delay intent, a thread-private stack counter, and every "
     "exit-state value provably computable, else the loop is left alone. "
-    "Elides real wall time, so enable per-title after auditing the accepted "
-    "collapses logged at startup.",
+    "Detection is default-deny and rare in practice; every accepted collapse "
+    "is logged. Disable for a title that depends on the elided wall time.",
     "CPU");
 
 DEFINE_bool(

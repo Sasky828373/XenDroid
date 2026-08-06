@@ -369,14 +369,29 @@ bool SetTlsValue(TlsHandle handle, uintptr_t value) {
 
 // Multi-object waits: each signal bumps a generation and notifies this
 // condvar so WaitMultiple wakes at once; the timeout cap covers a miss.
+// Diagnostics: how much a thread spends going round the wait-any poll loop.
+// Windows has one kernel wait here, so this cost is Android specific.
+thread_local uint64_t t_wait_any_calls = 0;
+thread_local uint64_t t_wait_any_iters = 0;
+thread_local uint64_t t_wait_any_park_ns = 0;
+
 static std::mutex g_multi_wait_mutex;
 static std::condition_variable g_multi_wait_cv;
 static std::atomic<uint64_t> g_multi_wait_gen{0};
+static std::atomic<uint32_t> g_multi_waiters{0};
 static void PokeMultiWaiters() {
-  {
-    std::lock_guard<std::mutex> lock(g_multi_wait_mutex);
-    g_multi_wait_gen.fetch_add(1, std::memory_order_relaxed);
+  // Bump the generation before reading the waiter count: a waiter that has
+  // just registered re-checks the generation under the mutex before sleeping,
+  // so it cannot miss this.
+  g_multi_wait_gen.fetch_add(1, std::memory_order_release);
+  if (g_multi_waiters.load(std::memory_order_acquire) == 0) {
+    // Skip the process-global mutex: this runs from the realtime audio
+    // callback, where blocking behind a guest thread costs an audio deadline.
+    return;
   }
+  // Notified without holding the mutex, so a realtime caller never blocks on
+  // it. A wakeup lost to the register/sleep race costs at most the 1ms park
+  // cap the waiter already applies.
   g_multi_wait_cv.notify_all();
 }
 
@@ -444,22 +459,53 @@ class PosixConditionBase {
     return Wait(timeout);
   }
 
-  // Wake this object's waiters and any parked WaitMultiple.
+  // The shared condvar is a notify_all, so poking it for an object nobody
+  // multi-waits on wakes every parked thread to re-check handles it does not
+  // care about.
   void NotifyAll() {
     cond_.notify_all();
-    PokeMultiWaiters();
+    if (multi_wait_refs_.load(std::memory_order_acquire) != 0) {
+      PokeMultiWaiters();
+    }
   }
+
+  // Number of parked WaitMultiple threads that include this object.
+  std::atomic<uint32_t> multi_wait_refs_{0};
+
+  // Registers the caller against every handle it is waiting on, so a signal
+  // knows whether waking the shared condvar can possibly help.
+  class MultiWaitRegistration {
+   public:
+    explicit MultiWaitRegistration(
+        const std::vector<PosixConditionBase*>& handles)
+        : handles_(handles) {
+      for (auto* h : handles_) {
+        h->multi_wait_refs_.fetch_add(1, std::memory_order_release);
+      }
+    }
+    ~MultiWaitRegistration() {
+      for (auto* h : handles_) {
+        h->multi_wait_refs_.fetch_sub(1, std::memory_order_release);
+      }
+    }
+
+   private:
+    const std::vector<PosixConditionBase*>& handles_;
+  };
 
   static std::pair<WaitResult, size_t> WaitMultiple(
       std::vector<PosixConditionBase*>&& handles, bool wait_all,
       std::chrono::milliseconds timeout) {
     assert_true(!handles.empty());
+    ++t_wait_any_calls;
 
     // For single handle, just use the normal Wait path.
     if (handles.size() == 1) {
       auto result = handles[0]->Wait(timeout);
       return std::make_pair(result, 0);
     }
+
+    MultiWaitRegistration registration(handles);
 
     // For multiple handles, we need to poll since we can't wait on multiple
     // condition variables simultaneously. This is a limitation of the POSIX
@@ -579,10 +625,20 @@ class PosixConditionBase {
       auto remaining =
           std::chrono::duration_cast<std::chrono::milliseconds>(end_time - now);
       auto park = std::min(remaining, std::chrono::milliseconds(1));
-      std::unique_lock<std::mutex> mw_lock(g_multi_wait_mutex);
-      g_multi_wait_cv.wait_for(mw_lock, park, [&] {
-        return g_multi_wait_gen.load(std::memory_order_acquire) != wait_gen;
-      });
+      ++t_wait_any_iters;
+      const auto park_begin = std::chrono::steady_clock::now();
+      g_multi_waiters.fetch_add(1, std::memory_order_release);
+      {
+        std::unique_lock<std::mutex> mw_lock(g_multi_wait_mutex);
+        g_multi_wait_cv.wait_for(mw_lock, park, [&] {
+          return g_multi_wait_gen.load(std::memory_order_acquire) != wait_gen;
+        });
+      }
+      g_multi_waiters.fetch_sub(1, std::memory_order_release);
+      t_wait_any_park_ns += static_cast<uint64_t>(
+          std::chrono::duration_cast<std::chrono::nanoseconds>(
+              std::chrono::steady_clock::now() - park_begin)
+              .count());
     }
   }
 
@@ -2089,6 +2145,12 @@ static void signal_handler(int signal, siginfo_t* info, void* /*context*/) {
     default:
       assert_always();
   }
+}
+
+void GetWaitAnyStats(uint64_t* calls, uint64_t* iters, uint64_t* park_ns) {
+  *calls = t_wait_any_calls;
+  *iters = t_wait_any_iters;
+  *park_ns = t_wait_any_park_ns;
 }
 
 }  // namespace threading

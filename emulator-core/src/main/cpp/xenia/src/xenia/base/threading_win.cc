@@ -648,5 +648,12 @@ Thread* Thread::GetCurrentThread() {
 
 void Thread::Exit(int exit_code) { ExitThread(exit_code); }
 
+void GetWaitAnyStats(uint64_t* calls, uint64_t* iters, uint64_t* park_ns) {
+  // Kernel wait, nothing to poll.
+  *calls = 0;
+  *iters = 0;
+  *park_ns = 0;
+}
+
 }  // namespace threading
 }  // namespace xe

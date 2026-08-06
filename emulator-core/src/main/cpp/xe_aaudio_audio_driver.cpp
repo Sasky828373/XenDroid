@@ -39,8 +39,20 @@ namespace aaudio {
 static constexpr uint32_t kStatsIntervalMs = 1000;
 
 AAudioAudioDriver::AAudioAudioDriver(Memory* memory,
-                                     xe::threading::Semaphore* semaphore)
-    : semaphore_(semaphore) {}
+                                     xe::threading::Semaphore* semaphore,
+                                     uint32_t frequency, uint32_t channels,
+                                     bool need_format_conversion)
+    : semaphore_(semaphore),
+      frame_frequency_(frequency),
+      frame_channels_(channels),
+      need_format_conversion_(need_format_conversion),
+      channel_samples_(channels == 6 ? 256 : 768),
+      submit_samples_(channels * (channels == 6 ? 256 : 768)),
+      host_block_samples_(host_frame_channels_ *
+                          (channels == 6 ? 256 : 768)) {
+  assert_true(channels == 6 || channels == 2);
+  last_block_.resize(host_block_samples_, 0.0f);
+}
 
 AAudioAudioDriver::~AAudioAudioDriver() {
   assert_true(frames_queued_.empty());
@@ -51,7 +63,7 @@ bool AAudioAudioDriver::Initialize() {
   {
     std::unique_lock<std::mutex> guard(frames_mutex_);
     for (int i = 0; i < 2; i++) {
-      float* buffer = new float[x360_frame_samples_];
+      float* buffer = new float[submit_samples_];
       frames_unused_.push(buffer);
     }
   }
@@ -81,7 +93,7 @@ bool AAudioAudioDriver::BuildStream() {
     }
 
     AAudioStreamBuilder_setFormat(builder_, AAUDIO_FORMAT_PCM_FLOAT);
-    AAudioStreamBuilder_setSampleRate(builder_, host_frame_frequency_);
+    AAudioStreamBuilder_setSampleRate(builder_, frame_frequency_);
     AAudioStreamBuilder_setChannelCount(builder_, host_frame_channels_);
     AAudioStreamBuilder_setFramesPerDataCallback(builder_, channel_samples_);
     AAudioStreamBuilder_setDataCallback(builder_, AudioCallback, this);
@@ -114,11 +126,18 @@ bool AAudioAudioDriver::BuildStream() {
       continue;
     }
 
-    // The granted burst is what matters, not what was requested.
+    // Size against the larger of burst and granted callback: a device can
+    // burst at 96 yet call back for 256, leaving under two callbacks of
+    // headroom if only the burst is used.
     const int32_t burst = AAudioStream_getFramesPerBurst(stream_);
-    if (burst > 0) {
+    const int32_t callback_frames =
+        AAudioStream_getFramesPerDataCallback(stream_);
+    const int32_t drain = std::max(
+        burst, callback_frames > 0 ? callback_frames
+                                   : static_cast<int32_t>(channel_samples_));
+    if (drain > 0) {
       AAudioStream_setBufferSizeInFrames(
-          stream_, burst * cvars::apu_aaudio_buffer_bursts);
+          stream_, drain * cvars::apu_aaudio_buffer_bursts);
     }
 
     // Requested and granted config frequently differ.
@@ -173,60 +192,88 @@ aaudio_data_callback_result_t AAudioAudioDriver::AudioCallback(
   // shared-mode fallback and on every rebuild. The conversion below uses
   // channel_samples_ as its source stride, so it must run at that size
   // whatever this callback was handed.
-  const int32_t block_frames =
-      std::min<int32_t>(numFrames, static_cast<int32_t>(channel_samples_));
   const int32_t out_samples = numFrames * host_frame_channels_;
-  const int32_t copy_samples = block_frames * host_frame_channels_;
-  if (numFrames != static_cast<int32_t>(channel_samples_)) {
+  if (numFrames != static_cast<int32_t>(driver->channel_samples_)) {
     driver->stat_unexpected_frames_.store(numFrames, std::memory_order_relaxed);
   }
 
-  float* buffer = nullptr;
-  uint32_t depth = 0;
-  {
-    // Held only across the queue pop.
-    std::unique_lock<std::mutex> guard(driver->frames_mutex_);
-    depth = static_cast<uint32_t>(driver->frames_queued_.size());
-    if (!driver->frames_queued_.empty()) {
-      buffer = driver->frames_queued_.front();
-      driver->frames_queued_.pop();
-    }
-  }
-
   driver->stat_callbacks_.fetch_add(1, std::memory_order_relaxed);
-  driver->stat_queue_depth_sum_.fetch_add(depth, std::memory_order_relaxed);
-  if (depth > driver->stat_queue_depth_max_.load(std::memory_order_relaxed)) {
-    driver->stat_queue_depth_max_.store(depth, std::memory_order_relaxed);
+
+  // Fill the whole request, however many guest blocks that takes: a callback
+  // size other than channel_samples_ would otherwise pad with silence or
+  // discard the rest of a block.
+  int32_t frames_done = 0;
+  uint32_t releases = 0;
+  bool gapped = false;
+  while (frames_done < numFrames) {
+    if (driver->last_block_pos_ >= driver->channel_samples_) {
+      float* buffer = nullptr;
+      uint32_t depth = 0;
+      {
+        // Held only across the queue pop.
+        std::unique_lock<std::mutex> guard(driver->frames_mutex_);
+        depth = static_cast<uint32_t>(driver->frames_queued_.size());
+        if (!driver->frames_queued_.empty()) {
+          buffer = driver->frames_queued_.front();
+          driver->frames_queued_.pop();
+        }
+      }
+      driver->stat_queue_depth_sum_.fetch_add(depth, std::memory_order_relaxed);
+      if (depth > driver->stat_queue_depth_max_.load(std::memory_order_relaxed)) {
+        driver->stat_queue_depth_max_.store(depth, std::memory_order_relaxed);
+      }
+      if (!buffer) {
+        // Conceal only the part still owed.
+        driver->stat_gaps_.fetch_add(1, std::memory_order_relaxed);
+        gapped = true;
+        // ConcealGap repeats last_block_, so it can source at most one block.
+        const int32_t done_samples = frames_done * host_frame_channels_;
+        const int32_t owed_samples = out_samples - done_samples;
+        driver->ConcealGap(
+            output_buffer + done_samples, owed_samples,
+            std::min(owed_samples, static_cast<int32_t>(driver->host_block_samples_)));
+        break;
+      }
+      if (driver->frame_channels_ == 6) {
+        conversion::sequential_6_BE_to_interleaved_2_LE(
+            driver->last_block_.data(), buffer, driver->channel_samples_);
+      } else {
+        // Media player: already interleaved host endian stereo.
+        std::memcpy(driver->last_block_.data(), buffer,
+                    driver->host_block_samples_ * sizeof(float));
+      }
+      driver->ApplyGainAndClamp();
+      driver->ApplyFadeIn();
+      driver->last_block_valid_ = true;
+      driver->last_block_pos_ = 0;
+      driver->gap_blocks_ = 0;
+      {
+        std::unique_lock<std::mutex> guard(driver->frames_mutex_);
+        driver->frames_unused_.push(buffer);
+      }
+      ++releases;
+    }
+    const int32_t chunk = std::min<int32_t>(
+        numFrames - frames_done,
+        static_cast<int32_t>(driver->channel_samples_ -
+                             driver->last_block_pos_));
+    std::memcpy(
+        output_buffer + frames_done * host_frame_channels_,
+        driver->last_block_.data() +
+            driver->last_block_pos_ * host_frame_channels_,
+        chunk * host_frame_channels_ * sizeof(float));
+    driver->last_block_pos_ += static_cast<uint32_t>(chunk);
+    frames_done += chunk;
   }
 
-  if (!buffer) {
-    driver->stat_gaps_.fetch_add(1, std::memory_order_relaxed);
-    driver->ConcealGap(output_buffer, out_samples, copy_samples);
-    // Tick the pacing semaphore even on underrun so the guest audio engine
-    // keeps running (a release at max count fails harmlessly). Outside the
-    // frames lock: this reaches a process-wide condition variable.
+  // One tick per block consumed, so pacing holds when the callback size is
+  // not a whole block. Tick once on underrun to keep the guest engine running.
+  if (releases == 0 && gapped) {
+    releases = 1;
+  }
+  for (uint32_t i = 0; i < releases; ++i) {
     driver->semaphore_->Release(1, nullptr);
-    return AAUDIO_CALLBACK_RESULT_CONTINUE;
   }
-
-
-  conversion::sequential_6_BE_to_interleaved_2_LE(driver->last_block_, buffer,
-                                                  channel_samples_);
-  driver->ApplyGainAndClamp();
-  driver->ApplyFadeIn();
-  std::memcpy(output_buffer, driver->last_block_, copy_samples * sizeof(float));
-  if (out_samples > copy_samples) {
-    std::memset(output_buffer + copy_samples, 0,
-                (out_samples - copy_samples) * sizeof(float));
-  }
-  driver->last_block_valid_ = true;
-  driver->gap_blocks_ = 0;
-
-  {
-    std::unique_lock<std::mutex> guard(driver->frames_mutex_);
-    driver->frames_unused_.push(buffer);
-  }
-  driver->semaphore_->Release(1, nullptr);
 
   return AAUDIO_CALLBACK_RESULT_CONTINUE;
 }
@@ -422,14 +469,14 @@ void AAudioAudioDriver::SubmitFrame(float* samples) {
   {
     std::unique_lock<std::mutex> guard(frames_mutex_);
     if (frames_unused_.empty()) {
-      output_frame = new float[x360_frame_samples_];
+      output_frame = new float[submit_samples_];
     } else {
       output_frame = frames_unused_.top();
       frames_unused_.pop();
     }
   }
 
-  std::memcpy(output_frame, samples, x360_frame_samples_ * sizeof(float));
+  std::memcpy(output_frame, samples, submit_samples_ * sizeof(float));
 
   {
     std::unique_lock<std::mutex> guard(frames_mutex_);

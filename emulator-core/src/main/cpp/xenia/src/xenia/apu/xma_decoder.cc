@@ -16,6 +16,13 @@
 #include "xenia/apu/xma_context_old.h"
 
 #include "xenia/base/cvar.h"
+#if XE_PLATFORM_xendroid
+#include <sys/resource.h>
+#endif
+
+#include <cerrno>
+#include <chrono>
+#include <cstring>
 #include "xenia/base/logging.h"
 #include "xenia/base/math.h"
 #include "xenia/base/profiling.h"
@@ -55,6 +62,8 @@ extern "C" {
 
 DEFINE_bool(ffmpeg_verbose, false, "Verbose FFmpeg output (debug and above)",
             "APU");
+
+DECLARE_bool(apu_aaudio_log_stats);
 
 DEFINE_bool(use_dedicated_xma_thread, true,
             "Enables XMA decoding on separate thread. Disabled should produce "
@@ -197,15 +206,72 @@ X_STATUS XmaDecoder::Setup(kernel::KernelState* kernel_state) {
 }
 
 void XmaDecoder::WorkerThreadMain() {
+
+#if XE_PLATFORM_xendroid
+  // Set here, not at the creation site: XThread applies its own priority
+  // after Create, and its kNormal maps to nice 4, below the Android default.
+  errno = 0;
+  if (setpriority(PRIO_PROCESS, 0, -12) != 0) {
+    XELOGW("XMA Decoder: setpriority(-12) failed: errno {} ({})", errno,
+           std::strerror(errno));
+  }
+#endif
+  // Whether decode keeps up. If this thread is saturated, the guest mixer has
+  // nothing to submit and the audio queue drains even though the audio worker
+  // is running normally.
+  auto stats_last = std::chrono::steady_clock::now();
+  uint64_t passes = 0, worked_contexts = 0, work_ns = 0, idle_waits = 0;
+  uint64_t last_decoded = 0, last_no_out = 0, last_consume_empty = 0,
+           last_no_space = 0;
+
+  worker_loop_active_.store(true, std::memory_order_release);
   while (worker_running_) {
     // Okay, let's loop through XMA contexts to find ones we need to decode!
     bool did_work = false;
+    const bool measure = cvars::apu_aaudio_log_stats;
+    const auto pass_begin = measure ? std::chrono::steady_clock::now()
+                                    : std::chrono::steady_clock::time_point{};
     for (uint32_t n = 0; n < kContextCount; n++) {
       bool worked = contexts_[n]->Work();
       if (worked) {
-        contexts_[n]->SignalWorkDone();
+        // After Work() wrote the guest-visible context data back.
+        contexts_[n]->CompleteConsumedKick();
+        if (measure) {
+          ++worked_contexts;
+        }
       }
       did_work = did_work || worked;
+    }
+    if (measure) {
+      ++passes;
+      work_ns += static_cast<uint64_t>(
+          std::chrono::duration_cast<std::chrono::nanoseconds>(
+              std::chrono::steady_clock::now() - pass_begin)
+              .count());
+      const auto now = std::chrono::steady_clock::now();
+      if (now - stats_last >= std::chrono::seconds(1)) {
+        uint64_t no_out = 0, consume_empty = 0, no_space = 0, decoded = 0;
+        GetXmaBailStats(&no_out, &consume_empty, &no_space, &decoded);
+        XELOGI(
+            "XmaWork: {} passes, {} context decodes, busy {:.1f}ms/s "
+            "({:.1f}% of wall), {} idle waits",
+            passes, worked_contexts, double(work_ns) / 1e6,
+            double(work_ns) / 1e7, idle_waits);
+        XELOGI(
+            "XmaBail: decoded {} | no output buffer {} | consume empty {} "
+            "| no ring space {} (deltas)",
+            decoded - last_decoded, no_out - last_no_out,
+            consume_empty - last_consume_empty, no_space - last_no_space);
+        last_decoded = decoded;
+        last_no_out = no_out;
+        last_consume_empty = consume_empty;
+        last_no_space = no_space;
+        passes = 0;
+        worked_contexts = 0;
+        work_ns = 0;
+        idle_waits = 0;
+        stats_last = now;
+      }
     }
 
     if (paused_) {
@@ -216,8 +282,12 @@ void XmaDecoder::WorkerThreadMain() {
     if (did_work) {
       continue;
     }
+    if (cvars::apu_aaudio_log_stats) {
+      ++idle_waits;
+    }
     xe::threading::Wait(work_event_.get(), false);
   }
+  worker_loop_active_.store(false, std::memory_order_release);
 }
 
 void XmaDecoder::Shutdown() {
@@ -275,6 +345,9 @@ void XmaDecoder::ReleaseContext(uint32_t guest_ptr) {
   XmaContext& context = *contexts_[context_id];
   assert_true(context.is_allocated());
   context.Release();
+  // Release takes lock_, so no Work() is in flight; free any waiter that
+  // kicked this context just before the guest tore it down.
+  context.CancelPendingKicks();
   context_bitmap_.Release(context_id);
 }
 
@@ -341,24 +414,29 @@ void XmaDecoder::WriteRegister(uint32_t addr, uint32_t value) {
     // The context ID is a bit in the range of the entire context array.
     const uint32_t base_context_id = (r - XmaRegister::Context0Kick) * 32;
     const uint32_t kicked_value = value;
+    const bool dedicated = cvars::use_dedicated_xma_thread;
+    // One sequence per kicked context, so each wait below is satisfied only by
+    // its own kick being serviced or cancelled.
+    uint64_t kick_seqs[32] = {};
     while (value) {
       const uint32_t context_id = base_context_id + std::countr_zero(value);
       auto& context = *contexts_[context_id];
-      context.Enable();
-      if (!cvars::use_dedicated_xma_thread) {
-        context.Work();
+      kick_seqs[context_id - base_context_id] = context.BeginKick();
+      if (!dedicated) {
+        if (context.Work()) {
+          context.CompleteConsumedKick();
+        }
       }
       value &= value - 1;
     }
     // Signal the decoder thread to start processing.
     work_event_->SetBoostPriority();
-    if (cvars::use_dedicated_xma_thread) {
+    if (dedicated) {
       // Block until the worker finishes, so the game sees updated context data.
       uint32_t remaining = kicked_value;
       while (remaining) {
-        const uint32_t context_id =
-            base_context_id + std::countr_zero(remaining);
-        contexts_[context_id]->WaitForWorkDone();
+        const uint32_t bit = std::countr_zero(remaining);
+        contexts_[base_context_id + bit]->WaitForKick(kick_seqs[bit]);
         remaining &= remaining - 1;
       }
     }
@@ -373,6 +451,9 @@ void XmaDecoder::WriteRegister(uint32_t addr, uint32_t value) {
       context.Disable();
       // Ensure the worker isn't mid-processing this context.
       context.Block(false);
+      // A kick this Lock just disarmed will never be serviced, so resolve it
+      // here or its kicking thread waits for a later kick's completion.
+      context.CancelPendingKicks();
       value &= value - 1;
     }
   } else if (r >= XmaRegister::Context0Clear &&
@@ -384,6 +465,7 @@ void XmaDecoder::WriteRegister(uint32_t addr, uint32_t value) {
       const uint32_t context_id = base_context_id + std::countr_zero(value);
       auto& context = *contexts_[context_id];
       context.Clear();
+      context.CancelPendingKicks();
       value &= value - 1;
     }
   } else {
@@ -420,7 +502,12 @@ void XmaDecoder::Pause() {
     work_event_->Set();
   }
 
-  pause_fence_.Wait();
+  // With inline decoding there is no worker loop to quiesce, so nothing will
+  // ever signal the fence: waiting here hangs the caller, and the pause comes
+  // from the UI thread.
+  if (worker_loop_active_.load(std::memory_order_acquire)) {
+    pause_fence_.Wait();
+  }
 }
 
 void XmaDecoder::Resume() {
@@ -429,7 +516,9 @@ void XmaDecoder::Resume() {
   }
   paused_ = false;
 
-  resume_fence_.Signal();
+  if (worker_loop_active_.load(std::memory_order_acquire)) {
+    resume_fence_.Signal();
+  }
 }
 
 }  // namespace apu

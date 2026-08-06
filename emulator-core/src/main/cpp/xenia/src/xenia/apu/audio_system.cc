@@ -14,6 +14,13 @@
 #include "xenia/apu/xma_decoder.h"
 #include "xenia/base/assert.h"
 #include "xenia/base/byte_stream.h"
+#if XE_PLATFORM_xendroid
+#include <sys/resource.h>
+#endif
+
+#include <atomic>
+#include <cstring>
+#include <cerrno>
 #include "xenia/base/logging.h"
 #include "xenia/base/math.h"
 #include "xenia/base/profiling.h"
@@ -34,6 +41,8 @@
 // The XMA*() functions just manipulate the audio system in the guest context
 // and let the normal AudioSystem handling take it, to prevent duplicate
 // implementations. They can be found in xboxkrnl_audio_xma.cc
+
+DECLARE_bool(apu_aaudio_log_stats);
 
 DEFINE_uint32(apu_max_queued_frames, 8,
               "Allows changing max buffered audio frames to reduce audio "
@@ -96,12 +105,71 @@ X_STATUS AudioSystem::Setup(kernel::KernelState* kernel_state) {
   return X_STATUS_SUCCESS;
 }
 
+#if XE_PLATFORM_xendroid
+// Reports the first failure rather than dropping it: an app that is not
+// allowed to renice would otherwise look like it had succeeded.
+void ApplyAudioThreadPriority(const char* what) {
+  static constexpr int kNice = -12;
+  errno = 0;
+  if (setpriority(PRIO_PROCESS, 0, kNice) != 0) {
+    static std::atomic<bool> reported{false};
+    bool expected = false;
+    if (reported.compare_exchange_strong(expected, true)) {
+      XELOGW("{}: setpriority({}) failed: errno {} ({})", what, kNice, errno,
+             std::strerror(errno));
+    }
+    return;
+  }
+  const int applied = getpriority(PRIO_PROCESS, 0);
+  static std::atomic<bool> logged{false};
+  bool expected = false;
+  if (logged.compare_exchange_strong(expected, true)) {
+    XELOGI("{}: nice set to {}", what, applied);
+  }
+}
+#endif
+
 void AudioSystem::WorkerThreadMain() {
   // Initialize driver and ringbuffer.
   Initialize();
 
+#if XE_PLATFORM_xendroid
+  // Set here, not at the creation site: XThread applies its own priority
+  // after Create, and its kNormal maps to nice 4, below the Android default.
+  // Re-applied in the loop below, because a later set_priority would undo it.
+  ApplyAudioThreadPriority("Audio Worker");
+#endif
+
+  // How much of the block budget the wait-any poll loop is eating. A block is
+  // 5.33ms and desktop waits in the kernel, so this is Android only cost.
+  auto stats_last = std::chrono::steady_clock::now();
+  uint64_t stats_calls = 0, stats_iters = 0, stats_park_ns = 0;
+
   // Main run loop.
   while (worker_running_) {
+    if (cvars::apu_aaudio_log_stats) {
+      const auto now = std::chrono::steady_clock::now();
+      if (now - stats_last >= std::chrono::seconds(1)) {
+        uint64_t calls = 0, iters = 0, park_ns = 0;
+        xe::threading::GetWaitAnyStats(&calls, &iters, &park_ns);
+        const uint64_t d_calls = calls - stats_calls;
+        const uint64_t d_iters = iters - stats_iters;
+        const uint64_t d_park = park_ns - stats_park_ns;
+        XELOGI(
+            "AudioWait: {} waits, {} poll iters ({:.2f} per wait), parked "
+            "{:.1f}ms/s ({:.1f}% of wall)",
+            d_calls, d_iters,
+            d_calls ? double(d_iters) / double(d_calls) : 0.0,
+            double(d_park) / 1e6, double(d_park) / 1e7);
+        stats_calls = calls;
+        stats_iters = iters;
+        stats_park_ns = park_ns;
+        stats_last = now;
+#if XE_PLATFORM_xendroid
+        ApplyAudioThreadPriority("Audio Worker");
+#endif
+      }
+    }
     // These handles signify the number of submitted samples. Once we reach
     // 64 samples, we wait until our audio backend releases a semaphore
     // (signaling a sample has finished playing)

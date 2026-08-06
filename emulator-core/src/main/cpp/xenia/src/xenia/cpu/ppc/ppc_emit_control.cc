@@ -108,6 +108,12 @@ int InstrEmit_branch(PPCHIRBuilder& f, const char* src, uint64_t cia,
         TryInlineGprlrSaverest(f, cia, target, lk)) {
       return 0;
     }
+    // Then small leaves generally. Only a linking call: a tail branch to a
+    // leaf is already as cheap as it gets, and the inlined body has no return
+    // of its own to fall out of.
+    if (lk && f.TryInlineLeafCall(target, cia)) {
+      return 0;
+    }
   }
 
   // TODO(benvanik): this may be wrong and overwrite LRs when not desired!

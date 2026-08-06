@@ -42,6 +42,11 @@ class PPCHIRBuilder : public hir::HIRBuilder {
 
   GuestFunction* function() const { return function_; }
   Function* LookupFunction(uint32_t address);
+
+  // Expands a call to a small leaf function inline. Returns false (having
+  // emitted nothing) when the target does not qualify, in which case the
+  // caller emits a normal call.
+  bool TryInlineLeafCall(uint32_t target_address, uint64_t cia);
   Label* LookupLabel(uint32_t address);
 
   Value* LoadLR();

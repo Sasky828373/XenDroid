@@ -34,6 +34,23 @@ DEFINE_bool(
     "unimplemented PowerPC instruction is encountered.",
     "CPU");
 
+DEFINE_bool(
+    inline_leaf_calls, true,
+    "Expand calls to small leaf guest functions inline instead of emitting a "
+    "real call. A leaf here is a run of straight-line instructions ending in "
+    "blr with no branches, traps or calls of its own, so inlining cannot "
+    "recurse and the function cannot longjmp through the skipped frame. Saves "
+    "the call indirection, the guest prologue and its stackpoint push, and "
+    "the return protocol - which together dwarf the two or three instructions "
+    "some of these leaves actually contain.",
+    "CPU");
+
+DEFINE_uint32(
+    inline_leaf_max_instructions, 16,
+    "Largest leaf, in guest instructions, that inline_leaf_calls will expand. "
+    "Raising it trades code cache size and translation time for fewer calls.",
+    "CPU");
+
 namespace xe {
 namespace cpu {
 namespace ppc {
@@ -200,6 +217,106 @@ bool PPCHIRBuilder::Emit(GuestFunction* function, uint32_t flags) {
   }
 
   return Finalize();
+}
+
+bool PPCHIRBuilder::TryInlineLeafCall(uint32_t target_address,
+                                      uint64_t cia) {
+  if (!cvars::inline_leaf_calls || !cvars::inline_leaf_max_instructions) {
+    return false;
+  }
+  // Never fold a function into itself, and never inline something that is
+  // really an import thunk or a builtin - those exist precisely to be called.
+  if (target_address == start_address_) {
+    return false;
+  }
+  if (Function* target = LookupFunction(target_address)) {
+    if (target->behavior() == Function::Behavior::kExtern ||
+        target->behavior() == Function::Behavior::kBuiltin ||
+        target->IsSaverest()) {
+      return false;
+    }
+  }
+
+  Memory* memory = frontend_->memory();
+  // A plain `blr`. Recognised by encoding before decoding, so the scan below
+  // can reject the whole branch/trap/syscall group without special cases.
+  constexpr uint32_t kBlr = 0x4E800020;
+
+  // Scan first, emit second: a rejection partway through emission could not be
+  // undone.
+  uint32_t body_count = 0;
+  {
+    uint32_t address = target_address;
+    for (;; address += 4) {
+      if (body_count > cvars::inline_leaf_max_instructions) {
+        return false;
+      }
+      uint8_t* ptr = memory->TranslateVirtual(address);
+      if (!ptr) {
+        return false;
+      }
+      uint32_t code = xe::load_and_swap<uint32_t>(ptr);
+      if (code == kBlr) {
+        break;  // terminal return, and the end of the body
+      }
+      auto opcode = LookupOpcode(code);
+      if (opcode == PPCOpcode::kInvalid) {
+        return false;
+      }
+      const auto& opcode_info = GetOpcodeInfo(opcode);
+      if (!opcode_info.emit) {
+        return false;
+      }
+      // Group B is branches, traps and sc. Rejecting it wholesale is what
+      // makes this safe: no labels are needed (this builder's label and
+      // offset tables are sized for the enclosing function only), no call can
+      // recurse, and no control leaves the run except through the blr above.
+      if (opcode_info.group == PPCOpcodeGroup::kB) {
+        return false;
+      }
+      ++body_count;
+    }
+  }
+  if (!body_count) {
+    return false;  // a bare `blr`; the call is already about to be elided
+  }
+
+  // The architectural effect of the bl itself. The inlined body may read LR,
+  // and the caller certainly may after we return.
+  Value* return_address = LoadConstantUint64(cia + 4);
+  StoreLR(return_address);
+
+  if (with_debug_info_) {
+    CommentFormat("inlined leaf {:08X} ({} instrs)", target_address,
+                  body_count);
+  }
+
+  // Emit the body. Deliberately no SourceOffset: the source map is keyed to
+  // the enclosing function's range, so a fault inside the inlined run is
+  // better attributed to this call site than to an address the map does not
+  // own.
+  uint32_t address = target_address;
+  for (uint32_t n = 0; n < body_count; ++n, address += 4) {
+    trace_info_.dest_count = 0;
+    uint32_t code = xe::load_and_swap<uint32_t>(memory->TranslateVirtual(address));
+    auto opcode = LookupOpcode(code);
+    const auto& opcode_info = GetOpcodeInfo(opcode);
+    if (opcode_info.type == PPCOpcodeType::kSync) {
+      ContextBarrier();
+    }
+    InstrData i;
+    i.address = address;
+    i.code = code;
+    i.opcode = opcode;
+    i.opcode_info = &opcode_info;
+    if (opcode_info.emit(*this, i)) {
+      // Unimplemented instruction. The normal path logs and carries on, so do
+      // the same rather than leaving a half-emitted body behind.
+      XELOGE("Unimplemented instr {:08X} {:08X} while inlining leaf {:08X}",
+             address, code, target_address);
+    }
+  }
+  return true;
 }
 
 void PPCHIRBuilder::MaybeBreakOnInstruction(uint32_t address) {

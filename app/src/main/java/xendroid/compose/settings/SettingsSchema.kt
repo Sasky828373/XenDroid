@@ -139,6 +139,12 @@ object SettingsSchema {
         )),
 
         SettingsCategory("GPU", listOf(
+            // Host presentation cap. A dropdown rather than a slider: only a
+            // few values are meaningful, and "unlimited" needs to be an
+            // explicit choice rather than the bottom of a range.
+            l("GPU", "framerate_limit", "Frame rate limit", "60",
+                "60" to "60 FPS", "30" to "30 FPS", "45" to "45 FPS",
+                "90" to "90 FPS", "120" to "120 FPS", "0" to "Unlimited"),
             b("GPU", "guest_display_refresh_cap", "Cap guest display refresh (VSync)", true),
             b("GPU", "store_shaders", "Store shaders", true),
             b("GPU", "resolve_resolution_scale_fill_half_pixel_offset", "Resolve scale: fill half-pixel offset", true),

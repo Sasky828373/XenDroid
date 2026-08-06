@@ -12,6 +12,9 @@
 
 #include <array>
 #include <atomic>
+#include <chrono>
+
+#include "xenia/base/logging.h"
 #include <mutex>
 #include <queue>
 
@@ -231,16 +234,56 @@ class XmaContext {
     is_enabled_.store(is_enabled, std::memory_order_release);
   }
 
-  // Signals that the worker has finished processing this context after a kick.
-  void SignalWorkDone() {
-    if (work_completion_event_) {
-      work_completion_event_->Set();
-    }
+  // Kick handshake. The event is only a doorbell: correctness lives in the
+  // sequence numbers, so a lost or stale wake cannot release a waiter early
+  // or strand one. A kick is resolved either by the worker servicing it or by
+  // the guest cancelling it through Lock/Clear/Release.
+
+  // Guest, before waking the worker. Bumping ahead of the arm is required:
+  // Work() consumes the arm with an acquire load, so an armed context always
+  // sees at least this sequence.
+  uint64_t BeginKick() {
+    const uint64_t seq = kick_seq_.fetch_add(1, std::memory_order_relaxed) + 1;
+    Enable();
+    return seq;
   }
-  // Blocks until the worker has finished processing this context.
-  void WaitForWorkDone() {
-    if (work_completion_event_) {
-      xe::threading::Wait(work_completion_event_.get(), false);
+
+  // Worker, inside Work() where the arm is consumed. Must be after the arm is
+  // cleared and under lock_, or the snapshot can miss a concurrent kick.
+  void ConsumeKick() {
+    set_is_enabled(false);
+    serviced_kick_seq_.store(kick_seq_.load(std::memory_order_acquire),
+                             std::memory_order_relaxed);
+  }
+
+  // Worker, after the decoded context data has been written back.
+  void CompleteConsumedKick() {
+    PublishDone(serviced_kick_seq_.load(std::memory_order_relaxed));
+  }
+
+  // Guest, after Disable()+Block() proved no Work() is in flight. A kick the
+  // guest itself disabled is resolved by cancellation; without this the
+  // sequence wait would hang instead of merely drifting.
+  void CancelPendingKicks() {
+    PublishDone(kick_seq_.load(std::memory_order_acquire));
+  }
+
+  // Guest, after BeginKick. The timeout is a backstop: one auto-reset event
+  // with several waiters on different targets can drop a wake, and polling
+  // beats a frozen guest thread.
+  void WaitForKick(uint64_t target) {
+    uint32_t waited_ms = 0;
+    while (done_seq_.load(std::memory_order_acquire) < target) {
+      if (!work_completion_event_) {
+        return;
+      }
+      xe::threading::Wait(work_completion_event_.get(), false,
+                          std::chrono::milliseconds(2));
+      waited_ms += 2;
+      if (waited_ms == 100) {
+        XELOGW("XmaContext {}: kick {} still unserviced after 100ms", id_,
+               target);
+      }
     }
   }
 
@@ -258,6 +301,24 @@ class XmaContext {
   std::atomic<bool> is_allocated_ = false;
   std::atomic<bool> is_enabled_ = false;
   std::unique_ptr<xe::threading::Event> work_completion_event_;
+
+  // Monotonic: a cancellation must never be regressed by a Work() that
+  // finishes late carrying an older snapshot.
+  void PublishDone(uint64_t seq) {
+    uint64_t seen = done_seq_.load(std::memory_order_relaxed);
+    while (seen < seq &&
+           !done_seq_.compare_exchange_weak(seen, seq,
+                                            std::memory_order_release,
+                                            std::memory_order_relaxed)) {
+    }
+    if (work_completion_event_) {
+      work_completion_event_->Set();
+    }
+  }
+
+  std::atomic<uint64_t> kick_seq_{0};
+  std::atomic<uint64_t> done_seq_{0};
+  std::atomic<uint64_t> serviced_kick_seq_{0};
 
   // ffmpeg structures
   AVPacket* av_packet_ = nullptr;

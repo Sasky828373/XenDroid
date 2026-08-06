@@ -81,6 +81,10 @@ class XmaDecoder {
   std::unique_ptr<xe::threading::Event> work_event_ = nullptr;
 
   std::atomic<bool> paused_ = false;
+  // True only while WorkerThreadMain is actually looping. The thread body is
+  // gated on use_dedicated_xma_thread, so without this Pause() waits on a
+  // fence that nothing will ever signal.
+  std::atomic<bool> worker_loop_active_ = {false};
   xe::threading::Fence pause_fence_;   // Signaled when worker paused.
   xe::threading::Fence resume_fence_;  // Signaled when resume requested.
 

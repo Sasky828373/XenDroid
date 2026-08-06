@@ -121,6 +121,10 @@ void set_current_thread_id(uint32_t id);
 void set_name(const std::string_view name);
 
 // Yields the current thread to the scheduler. Maybe.
+// Wait-any poll-loop cost for the calling thread. Only meaningful on POSIX,
+// where a wait-any polls; Windows waits in the kernel.
+void GetWaitAnyStats(uint64_t* calls, uint64_t* iters, uint64_t* park_ns);
+
 void MaybeYield();
 
 // Memory barrier (request - may be ignored).

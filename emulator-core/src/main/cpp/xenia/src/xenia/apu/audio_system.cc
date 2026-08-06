@@ -16,6 +16,14 @@
 #include "xenia/apu/xma_decoder.h"
 #include "xenia/base/assert.h"
 #include "xenia/base/byte_stream.h"
+#if XE_PLATFORM_xendroid
+#include <sys/resource.h>
+#endif
+
+#include <atomic>
+#include <cerrno>
+#include <cstring>
+
 #include "xenia/base/clock.h"
 #include "xenia/base/logging.h"
 #include "xenia/base/math.h"
@@ -37,6 +45,8 @@
 // The XMA*() functions just manipulate the audio system in the guest context
 // and let the normal AudioSystem handling take it, to prevent duplicate
 // implementations. They can be found in xboxkrnl_audio_xma.cc
+
+DECLARE_bool(apu_aaudio_log_stats);
 
 DEFINE_uint32(apu_max_queued_frames, 8,
               "Allows changing max buffered audio frames to reduce audio "
@@ -98,9 +108,41 @@ X_STATUS AudioSystem::Setup(kernel::KernelState* kernel_state) {
   return X_STATUS_SUCCESS;
 }
 
+#if XE_PLATFORM_xendroid
+// Reports the first failure rather than dropping it: an app that is not
+// allowed to renice would otherwise look like it had succeeded.
+void ApplyAudioThreadPriority(const char* what) {
+  static constexpr int kNice = -12;
+  errno = 0;
+  if (setpriority(PRIO_PROCESS, 0, kNice) != 0) {
+    static std::atomic<bool> reported{false};
+    bool expected = false;
+    if (reported.compare_exchange_strong(expected, true)) {
+      XELOGW("{}: setpriority({}) failed: errno {} ({})", what, kNice, errno,
+             std::strerror(errno));
+    }
+    return;
+  }
+  const int applied = getpriority(PRIO_PROCESS, 0);
+  static std::atomic<bool> logged{false};
+  bool expected = false;
+  if (logged.compare_exchange_strong(expected, true)) {
+    XELOGI("{}: nice set to {}", what, applied);
+  }
+}
+#endif
+
 void AudioSystem::WorkerThreadMain() {
   // Initialize driver and ringbuffer.
   Initialize();
+
+#if XE_PLATFORM_xendroid
+  // Set here, not at the creation site: XThread applies its own priority
+  // after Create, and its kNormal maps to nice 4, below the Android default.
+  // Re-applied in the loop below, because a later set_priority would undo it.
+  ApplyAudioThreadPriority("Audio Worker");
+  auto priority_last = std::chrono::steady_clock::now();
+#endif
 
   // The host mixer releases a client's semaphore on its own coarse cadence,
   // but Xenos audio subsystem operates at 5.333ms interval (see
@@ -110,6 +152,16 @@ void AudioSystem::WorkerThreadMain() {
   // a host output slot is free, otherwise it is dropped (the host queue
   // is full, so it is already well buffered).
   while (worker_running_) {
+#if XE_PLATFORM_xendroid
+    {
+      const auto priority_now = std::chrono::steady_clock::now();
+      if (priority_now - priority_last >= std::chrono::seconds(1)) {
+        priority_last = priority_now;
+        ApplyAudioThreadPriority("Audio Worker");
+      }
+    }
+#endif
+
     const uint64_t now = static_cast<uint64_t>(
         std::chrono::duration_cast<std::chrono::microseconds>(
             std::chrono::steady_clock::now().time_since_epoch())

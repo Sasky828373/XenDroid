@@ -7,6 +7,8 @@
 ******************************************************************************
 */
 
+#include <atomic>
+
 #include "xenia/apu/xma_context_new.h"
 #include "xenia/apu/xma_helpers.h"
 
@@ -110,19 +112,37 @@ RingBuffer XmaContextNew::PrepareOutputRingBuffer(XMA_CONTEXT_DATA* data) {
   return output_rb;
 }
 
+// Why a serviced kick produced no samples. A context that keeps bailing here
+// leaves its output buffer untouched, so the guest mixes whatever was already
+// there - which is what "complete static" sounds like.
+std::atomic<uint64_t> g_xma_bail_no_output_buffer{0};
+std::atomic<uint64_t> g_xma_bail_consume_empty{0};
+std::atomic<uint64_t> g_xma_bail_no_space{0};
+std::atomic<uint64_t> g_xma_decoded{0};
+
+void GetXmaBailStats(uint64_t* no_output, uint64_t* consume_empty,
+                     uint64_t* no_space, uint64_t* decoded) {
+  *no_output = g_xma_bail_no_output_buffer.load(std::memory_order_relaxed);
+  *consume_empty = g_xma_bail_consume_empty.load(std::memory_order_relaxed);
+  *no_space = g_xma_bail_no_space.load(std::memory_order_relaxed);
+  *decoded = g_xma_decoded.load(std::memory_order_relaxed);
+}
+
 bool XmaContextNew::Work() {
   if (!is_enabled() || !is_allocated()) {
     return false;
   }
 
   std::lock_guard<xe_mutex> lock(lock_);
-  set_is_enabled(false);
+  // Consumes the arm and snapshots the kick it services.
+  ConsumeKick();
 
   auto context_ptr = memory()->TranslateVirtual(guest_ptr());
   XMA_CONTEXT_DATA data(context_ptr);
   const XMA_CONTEXT_DATA initial_data = data;
 
   if (!data.output_buffer_valid) {
+    g_xma_bail_no_output_buffer.fetch_add(1, std::memory_order_relaxed);
     return true;
   }
 
@@ -132,6 +152,7 @@ bool XmaContextNew::Work() {
     // Nothing to drain — don't touch the context or we'll reset the
     // game's output buffer offsets, causing stale PCM to be re-read.
     if (current_frame_remaining_subframes_ == 0) {
+      g_xma_bail_consume_empty.fetch_add(1, std::memory_order_relaxed);
       return true;
     }
     XELOGAPU("XmaContext {}: Consume-only context, draining subframes", id());
@@ -165,10 +186,12 @@ bool XmaContextNew::Work() {
     XELOGD("XmaContext {}: No space for subframe decoding {}/{}!", id(),
            minimum_subframe_decode_count,
            remaining_subframe_blocks_in_output_buffer_);
+    g_xma_bail_no_space.fetch_add(1, std::memory_order_relaxed);
     StoreContextMerged(data, initial_data, context_ptr);
     return true;
   }
 
+  g_xma_decoded.fetch_add(1, std::memory_order_relaxed);
   while (remaining_subframe_blocks_in_output_buffer_ >=
          minimum_subframe_decode_count) {
     XELOGAPU(
@@ -962,6 +985,12 @@ bool XmaContextNew::DecodePacket(AVCodecContext* av_context,
 void XmaContextNew::StoreContextMerged(const XMA_CONTEXT_DATA& data,
                                        const XMA_CONTEXT_DATA& initial_data,
                                        uint8_t* context_ptr) {
+  // The guest mixer polls output_buffer_write_offset from another thread and
+  // then reads the PCM behind it. Publish the ring writes before the offset:
+  // without this, weakly ordered CPUs can expose the new offset ahead of the
+  // samples and the game mixes stale data. x86 never shows this (TSO).
+  std::atomic_thread_fence(std::memory_order_release);
+
   XMA_CONTEXT_DATA fresh(context_ptr);
 
   // DWORD 0: decoder owns loop_count, output_buffer_write_offset.

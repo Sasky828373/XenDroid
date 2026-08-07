@@ -11,6 +11,8 @@
 
 #include <algorithm>
 #include <chrono>
+#include <mutex>
+#include <set>
 
 #include "third_party/fmt/include/fmt/format.h"
 #include "xenia/base/byte_stream.h"
@@ -910,13 +912,21 @@ void CommandProcessor::HandleSpecialRegisterWrite(uint32_t index,
       // Enabled - write to address.
       uint32_t scratch_addr = regs.values[XE_GPU_REG_SCRATCH_ADDR];
       uint32_t mem_addr = scratch_addr + (scratch_reg * 4);
-      // Unbudgeted log for RARE callback installs (REG4: anything that is
-      // not the sentinel or the two per-frame swap/vblank callbacks) - the
-      // deferred-kick train install is the event of interest.
+      // A REG4 value that is not one of the known per-frame callbacks is
+      // interesting once, but "known" is a hardcoded list from one title:
+      // any other game's callback looks rare on every single write. Log the
+      // first sighting of each distinct value, so an install is still
+      // reported without spending a formatted log line per frame forever.
       static std::atomic<uint32_t> scratch_log_budget{64};
       bool rare_install =
           scratch_reg == 4 && value != 0x0BADF00D && value != 0x83744BF8 &&
           value != 0x837C59C8;
+      if (rare_install) {
+        static std::mutex seen_mutex;
+        static std::set<uint32_t> seen_installs;
+        std::lock_guard<std::mutex> lock(seen_mutex);
+        rare_install = seen_installs.insert(value).second;
+      }
       if (rare_install ||
           (scratch_log_budget.load() > 0 && scratch_log_budget-- > 0)) {
         XELOGI("CP: scratch writeback REG{} value={:08X} -> phys {:08X}{}",

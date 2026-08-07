@@ -132,6 +132,15 @@ PPCTranslator::PPCTranslator(PPCFrontend* frontend) : frontend_(frontend) {
     compiler_->AddPass(std::make_unique<passes::ValidationPass>());
   }
 
+  // Give the polls the collapses above cannot touch - indefinite waits on
+  // memory another agent writes (GPU fence and frame waits) - the same
+  // adaptive spin-then-park their collapsed cousins get. Runs after them so
+  // it only sees loops that survived, on the same still-valid CFG edges.
+  compiler_->AddPass(std::make_unique<passes::MemoryPollParkPass>());
+  if (validate) {
+    compiler_->AddPass(std::make_unique<passes::ValidationPass>());
+  }
+
   if (backend->machine_info()->supports_extended_load_store) {
     // Backend supports the advanced LOAD/STORE instructions.
     // These will save us a lot of HIR opcodes.

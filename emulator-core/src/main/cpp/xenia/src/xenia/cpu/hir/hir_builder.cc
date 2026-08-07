@@ -1369,10 +1369,11 @@ void HIRBuilder::DelayExecution() {
   AppendInstr(OPCODE_DELAY_EXECUTION_info, 0);
 }
 
-void HIRBuilder::SpinBackoff(uint32_t units) {
+Instr* HIRBuilder::SpinBackoff(uint32_t units) {
   Instr* i = AppendInstr(OPCODE_SPIN_BACKOFF_info, 0);
   i->src1.offset = units;
   i->src2.value = i->src3.value = NULL;
+  return i;
 }
 void HIRBuilder::SetRoundingMode(Value* value) {
   ASSERT_INTEGER_TYPE(value);

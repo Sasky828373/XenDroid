@@ -229,6 +229,47 @@ void PPCTranslator::DumpHIR(GuestFunction* function, PPCHIRBuilder* builder) {
     fclose(f);
   }
 }
+// Written beside the HIR dump as <addr>.bin, so the emitted code a dumped
+// function actually runs can be disassembled and compared against its HIR.
+void PPCTranslator::DumpMachineCode(GuestFunction* function) {
+  if (!cvars::dump_translated_hir_functions) {
+    return;
+  }
+  if (!function->machine_code() || !function->machine_code_length()) {
+    return;
+  }
+
+  XexModule* mod = dynamic_cast<XexModule*>(function->module());
+  std::string folder_name = "hirdump";
+  if (mod) {
+    xex2_opt_execution_info* opt_exec_info = nullptr;
+    if (mod->GetOptHeader(XEX_HEADER_EXECUTION_INFO, &opt_exec_info)) {
+      folder_name = "hirdump_title_" + std::to_string(opt_exec_info->title_id);
+    }
+  }
+  std::filesystem::path folder_path = folder_name;
+  if (xe::filesystem::CreateFolder(folder_path)) {
+    std::error_code ec;
+    auto tmp = std::filesystem::temp_directory_path(ec);
+    if (ec) {
+      return;
+    }
+    folder_path = tmp / folder_name;
+    if (xe::filesystem::CreateFolder(folder_path)) {
+      return;
+    }
+  }
+  char tmpbuf[64];
+  std::snprintf(tmpbuf, sizeof(tmpbuf), "%X.bin", function->address());
+  folder_path /= tmpbuf;
+
+  FILE* f = xe::filesystem::OpenFile(folder_path, "wb");
+  if (f) {
+    fwrite(function->machine_code(), 1, function->machine_code_length(), f);
+    fclose(f);
+  }
+}
+
 bool PPCTranslator::Translate(GuestFunction* function,
                               uint32_t debug_info_flags) {
   SCOPE_profile_cpu_f("cpu");
@@ -332,6 +373,8 @@ bool PPCTranslator::Translate(GuestFunction* function,
                             std::move(debug_info))) {
     return false;
   }
+
+  DumpMachineCode(function);
 
   return true;
 }

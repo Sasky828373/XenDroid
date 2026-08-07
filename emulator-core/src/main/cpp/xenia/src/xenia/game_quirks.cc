@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: WTFPL
 #include "xenia/game_quirks.h"
 
+#include <array>
 #include <string>
 #include <variant>
 
@@ -19,10 +20,10 @@ struct Quirk {
   const char* note;
 };
 
-static const Quirk kQuirks[] = {
-    // Ace Combat 6: audio handshake deadlocks without strict event hand-off.
-    {0x4E4D07D1, "auto_reset_event_handoff", true, "audio-handshake deadlock"},
-};
+// No titles currently need a quirk. Add entries as {title_id, cvar, value,
+// note}; they apply at per-game-config priority, so a user's own per-game
+// config still overrides them.
+static const std::array<Quirk, 0> kQuirks{};
 
 // Same path/priority as a per-game config file.
 static bool ApplyOne(const Quirk& quirk) {

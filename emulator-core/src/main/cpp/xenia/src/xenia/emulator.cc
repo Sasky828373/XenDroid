@@ -91,9 +91,9 @@ DEFINE_double(time_scalar, 1.0,
 DEFINE_bool(
     auto_reset_event_handoff, false,
     "Strict NT SetEvent semantics for auto-reset events (directed FIFO "
-    "hand-off to a parked waiter). Fixes Ace Combat 6's audio-handshake "
-    "deadlock but can regress synchronization timing in other titles; enabled "
-    "per title via game quirks and overridable in the per-game config.",
+    "hand-off to a parked waiter). Can regress synchronization timing, so it "
+    "is off by default; the handshake deadlock it was added for is fixed by "
+    "the scheduler's targeted wakes instead.",
     "Kernel");
 
 DEFINE_string(

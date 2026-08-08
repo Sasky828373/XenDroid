@@ -61,11 +61,13 @@ DEFINE_bool(
     "GPU");
 
 DEFINE_bool(
-    resolve_copy_dest_number_packing, true,
+    resolve_copy_dest_number_packing, false,
     "Pack full-resolve fixed destinations according to copy_dest_number "
     "instead of assuming an unsigned fraction.\n"
-    "Disabling restores the pre-upstream packing and keeps signed/integer "
-    "destinations eligible for the raw fast copy.",
+    "Off restores the pre-upstream packing and keeps signed/integer "
+    "destinations eligible for the raw fast copy. Only has an effect with "
+    "accurate_resolve_number_formats on; the lean shaders ignore the "
+    "destination number format entirely.",
     "GPU");
 
 DEFINE_bool(

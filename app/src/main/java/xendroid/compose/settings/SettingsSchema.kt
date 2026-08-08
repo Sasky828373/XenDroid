@@ -177,9 +177,12 @@ object SettingsSchema {
             l("GPU", "render_target_path", "Render target path", "performance",
                 "performance" to "performance", "accuracy" to "accuracy"),
             b("GPU", "half_pixel_offset", "Half-pixel offset", true),
-            b("GPU", "texture_gradient_exp_bias", "Per-axis gradient LOD bias", false),
-            b("GPU", "texture_integer_num_format", "Integer num_format texture scaling", false),
-            b("GPU", "accurate_resolve_number_formats", "Accurate resolve number formats", false),
+            // Upstream accuracy features that only a few titles need but cost
+            // shader performance in every title. Off = pre-upstream behaviour.
+            b("GPU", "texture_gradient_exp_bias", "Accuracy: per-axis gradient LOD bias", false),
+            b("GPU", "texture_integer_num_format", "Accuracy: integer num_format texture scaling", false),
+            b("GPU", "accurate_resolve_number_formats", "Accuracy: resolve number formats and gamma", false),
+            b("GPU", "resolve_copy_dest_number_packing", "Accuracy: full-resolve destination packing", false),
             b("GPU", "log_ringbuffer_kickoff_initiator_bts", "Log ringbuffer kickoff initiator BTs", false),
             i("GPU", "texture_cache_memory_limit_hard", "Texture cache hard limit (MB)", 768, 512, 4096),
             i("GPU", "gpu_stall_spin_iterations", "GPU stall spin iterations", 32, 0, 512),

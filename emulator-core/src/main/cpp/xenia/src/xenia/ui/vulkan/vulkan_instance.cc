@@ -63,6 +63,13 @@ DEFINE_string(
 UPDATE_from_string(turnip_debug, 2026, 7, 24, 12, "");
 
 DEFINE_string(
+    ir3_debug, "",
+    "Comma-separated IR3_DEBUG flags for the Turnip shader compiler, e.g. "
+    "nopreamble or noearlypreamble to keep uniform math out of the shader "
+    "preamble. Empty leaves IR3_DEBUG unset.",
+    "Vulkan");
+
+DEFINE_string(
     turnip_perf_sampler, "",
     "Enable the instrumented Turnip build's whole-GPU KGSL performance "
     "counter sampler. Empty disables it. \"1\" samples the default triage "
@@ -137,6 +144,12 @@ std::unique_ptr<VulkanInstance> VulkanInstance::Create(
     if (!tu_debug.empty()) {
       setenv("TU_DEBUG", tu_debug.c_str(), 1);
       XELOGI("Set TU_DEBUG={} for the Turnip Vulkan driver", tu_debug);
+    }
+    // Read when the compiler is created, so set it before the driver loads.
+    if (!std::string(cvars::ir3_debug).empty()) {
+      setenv("IR3_DEBUG", cvars::ir3_debug.c_str(), 1);
+      XELOGI("Set IR3_DEBUG={} for the Turnip shader compiler",
+             cvars::ir3_debug);
     }
     // Whole-GPU hardware counter sampler in the instrumented Turnip build.
     // Read at device creation like TU_DEBUG, so it must be set before load.

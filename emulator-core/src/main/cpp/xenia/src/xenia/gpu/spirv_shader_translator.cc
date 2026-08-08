@@ -45,6 +45,16 @@ DEFINE_bool(
 DECLARE_bool(precise_interpolation);
 
 DEFINE_bool(
+    spirv_multiply_zero_test_on_bits, false,
+    "Test multiply operands for zero on their raw bits instead of as "
+    "min(|a|, |b|) == 0.0 when emulating Shader Model 3 zero semantics.\n"
+    "Both forms are equivalent, but Mesa folds the float one into nir_op_fmulz "
+    "and then nir_op_fmadz, which the Adreno ir3 compiler does not implement - "
+    "it aborts shader compilation (Project Gotham Racing 3, Dark Souls on "
+    "a8xx). Enable for titles whose shaders fail to compile that way.",
+    "GPU");
+
+DEFINE_bool(
     spirv_switch_case_jump_fallthrough, false,
     "Re-enter the main loop instead of falling through into the next control "
     "flow block, working around an NVIDIA shader compiler bug that turns an "

@@ -30,6 +30,10 @@ static const Quirk kQuirks[] = {
     // epilogues expose. Keep the save half inlined, call the restores.
     {0x544307D5, "inline_gprlr_saverest_parts", int64_t(1),
      "FMV slice desync with inlined restores"},
+    {0x4D5307D1, "spirv_multiply_zero_test_on_bits", true,
+     "ir3 cannot compile fmadz"},
+    {0x4E4D083A, "spirv_multiply_zero_test_on_bits", true,
+     "ir3 cannot compile fmadz"},
 };
 
 // Same path/priority as a per-game config file.

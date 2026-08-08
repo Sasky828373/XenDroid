@@ -125,22 +125,50 @@ uint XePackFixed(float value, uint bits, uint num_format) {
   return packed & unsigned_max;
 }
 
+// num_format reduces to clamp bounds and a scale rather than four alternative
+// bodies: it is uniform, so those terms hoist and only one arithmetic path is
+// emitted. Keeping every path live costs registers and occupancy on tiled GPUs
+// even when the branch is never taken.
+#define XE_PACK_FIXED_BODY(vec_float, vec_uint, vec_int, splat_float, \
+                           splat_uint, ones)                          \
+  vec_uint unsigned_max = (splat_uint(1u) << bits) - ones;            \
+  vec_uint half_scale = splat_uint(1u) << (bits - ones);              \
+  vec_float positive_max = vec_float(half_scale - ones);              \
+  bool is_signed =                                                    \
+      num_format == kXenosSurfaceNumberFormat_SignedRepeatingFraction ||  \
+      num_format == kXenosSurfaceNumberFormat_SignedInteger;          \
+  bool is_integer =                                                   \
+      num_format == kXenosSurfaceNumberFormat_UnsignedInteger ||      \
+      num_format == kXenosSurfaceNumberFormat_SignedInteger;          \
+  vec_float scale = is_integer ? splat_float(1.0f)                    \
+                               : (is_signed ? positive_max            \
+                                            : vec_float(unsigned_max)); \
+  vec_float low = is_signed ? (is_integer ? -vec_float(half_scale)    \
+                                          : splat_float(-1.0f))       \
+                            : splat_float(0.0f);                      \
+  vec_float high = is_integer                                         \
+                       ? (is_signed ? positive_max                    \
+                                    : vec_float(unsigned_max))        \
+                       : splat_float(1.0f);                           \
+  vec_float scaled = clamp(f, low, high) * scale;                     \
+  vec_float rounded =                                                 \
+      scaled + select_xe(greater_than_equal_xe(scaled, splat_float(0.0f)), \
+                         splat_float(0.5f), splat_float(-0.5f));      \
+  return vec_uint(vec_int(rounded)) & unsigned_max;
+
 uint4_xe XePackFixed4(float4_xe f, uint4_xe bits, uint num_format) {
-  return uint4_xe(XePackFixed(f.x, bits.x, num_format),
-                  XePackFixed(f.y, bits.y, num_format),
-                  XePackFixed(f.z, bits.z, num_format),
-                  XePackFixed(f.w, bits.w, num_format));
+  XE_PACK_FIXED_BODY(float4_xe, uint4_xe, int4_xe, float_x4_xe, uint_x4_xe,
+                     uint_x4_xe(1u))
 }
 
 uint3_xe XePackFixed3(float3_xe f, uint3_xe bits, uint num_format) {
-  return uint3_xe(XePackFixed(f.x, bits.x, num_format),
-                  XePackFixed(f.y, bits.y, num_format),
-                  XePackFixed(f.z, bits.z, num_format));
+  XE_PACK_FIXED_BODY(float3_xe, uint3_xe, int3_xe, float_x3_xe, uint_x3_xe,
+                     uint_x3_xe(1u))
 }
 
 uint2_xe XePackFixed2(float2_xe f, uint2_xe bits, uint num_format) {
-  return uint2_xe(XePackFixed(f.x, bits.x, num_format),
-                  XePackFixed(f.y, bits.y, num_format));
+  XE_PACK_FIXED_BODY(float2_xe, uint2_xe, int2_xe, float_x2_xe, uint_x2_xe,
+                     uint_x2_xe(1u))
 }
 
 uint XePackR5G5B5A1(float4_xe f, uint num_format) {

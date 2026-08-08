@@ -48,6 +48,14 @@ DEFINE_bool(
 UPDATE_from_bool(resolve_check_number_format, 2026, 7, 30, 12, false);
 
 DEFINE_bool(
+    resolve_copy_dest_number_packing, true,
+    "Pack full-resolve fixed destinations according to copy_dest_number "
+    "instead of assuming an unsigned fraction.\n"
+    "Disabling restores the pre-upstream packing and keeps signed/integer "
+    "destinations eligible for the raw fast copy.",
+    "GPU");
+
+DEFINE_bool(
     gamma_decode_pwl_resolve, true,
     "During 8_8_8_8_GAMMA MSAA color resolves, average the samples in linear "
     "space instead of averaging the encoded PWL gamma values directly.\n"
@@ -1377,6 +1385,13 @@ bool GetResolveInfo(const RegisterFile& regs, const Memory& memory,
   // Override with the depth format to make sure the shader doesn't have any
   // reason to try to do k_8_8_8_8 packing.
   info_out.copy_dest_info.copy_dest_format = xenos::ColorFormat(dest_format);
+  if (!cvars::resolve_copy_dest_number_packing) {
+    // Pre-upstream behaviour: the full-resolve packers assumed an unsigned
+    // fraction destination. Forcing it here also feeds the fast-path number
+    // format test below, so a raw copy stays eligible exactly as it used to.
+    info_out.copy_dest_info.copy_dest_number =
+        xenos::SurfaceNumberFormat::kUnsignedRepeatingFraction;
+  }
   // Handle k_16_16 and k_16_16_16_16 range.
   info_out.copy_dest_info.copy_dest_exp_bias = exp_bias;
   if (is_depth) {

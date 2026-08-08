@@ -12,6 +12,7 @@
 #include <cfloat>
 #include <cmath>
 #include <cstdint>
+#include <vector>
 
 #include "third_party/glslang/SPIRV/GLSL.std.450.h"
 #include "xenia/base/assert.h"
@@ -28,14 +29,28 @@ spv::Id SpirvShaderTranslator::ZeroIfAnyOperandIsZero(spv::Id value,
   int num_components = builder_->getNumComponents(value);
   assert_true(builder_->getNumComponents(operand_0_abs) == num_components);
   assert_true(builder_->getNumComponents(operand_1_abs) == num_components);
+  // Equivalent to min(|a|, |b|) == 0.0 - the operands are already absolute, so
+  // their bit patterns order like their values. The float form is folded by
+  // Mesa into nir_op_fmadz, which the Adreno ir3 compiler cannot compile.
+  spv::Id type_uint_vector = type_uint_vectors_[num_components - 1];
+  spv::Id operand_0_bits =
+      builder_->createUnaryOp(spv::OpBitcast, type_uint_vector, operand_0_abs);
+  spv::Id operand_1_bits =
+      builder_->createUnaryOp(spv::OpBitcast, type_uint_vector, operand_1_abs);
+  spv::Id min_bits = builder_->createBinBuiltinCall(
+      type_uint_vector, ext_inst_glsl_std_450_, GLSLstd450UMin, operand_0_bits,
+      operand_1_bits);
+  spv::Id const_uint_zero = builder_->makeUintConstant(0);
+  if (num_components > 1) {
+    std::vector<spv::Id> components(size_t(num_components), const_uint_zero);
+    const_uint_zero =
+        builder_->makeCompositeConstant(type_uint_vector, components);
+  }
   return builder_->createTriOp(
       spv::OpSelect, type_float_,
-      builder_->createBinOp(
-          spv::OpFOrdEqual, type_bool_vectors_[num_components - 1],
-          builder_->createBinBuiltinCall(
-              type_float_vectors_[num_components - 1], ext_inst_glsl_std_450_,
-              GLSLstd450NMin, operand_0_abs, operand_1_abs),
-          const_float_vectors_0_[num_components - 1]),
+      builder_->createBinOp(spv::OpIEqual,
+                            type_bool_vectors_[num_components - 1], min_bits,
+                            const_uint_zero),
       const_float_vectors_0_[num_components - 1], value);
 }
 

@@ -35,6 +35,7 @@
 #include "xenia/gpu/xenos.h"
 #include "xenia/ui/vulkan/vulkan_util.h"
 
+DECLARE_bool(accurate_resolve_number_formats);
 DECLARE_bool(rt_cache_ownership_claim_memo);
 DECLARE_bool(vulkan_dynamic_rendering);
 
@@ -142,15 +143,25 @@ namespace shaders {
 #include "xenia/gpu/shaders/bytecode/vulkan_spirv/resolve_fast_64bpp_4xmsaa_cs.h"
 #include "xenia/gpu/shaders/bytecode/vulkan_spirv/resolve_fast_64bpp_4xmsaa_scaled_cs.h"
 #include "xenia/gpu/shaders/bytecode/vulkan_spirv/resolve_full_128bpp_cs.h"
+#include "xenia/gpu/shaders/bytecode/vulkan_spirv/resolve_full_128bpp_fast_cs.h"
 #include "xenia/gpu/shaders/bytecode/vulkan_spirv/resolve_full_128bpp_scaled_cs.h"
+#include "xenia/gpu/shaders/bytecode/vulkan_spirv/resolve_full_128bpp_fast_scaled_cs.h"
 #include "xenia/gpu/shaders/bytecode/vulkan_spirv/resolve_full_16bpp_cs.h"
+#include "xenia/gpu/shaders/bytecode/vulkan_spirv/resolve_full_16bpp_fast_cs.h"
 #include "xenia/gpu/shaders/bytecode/vulkan_spirv/resolve_full_16bpp_scaled_cs.h"
+#include "xenia/gpu/shaders/bytecode/vulkan_spirv/resolve_full_16bpp_fast_scaled_cs.h"
 #include "xenia/gpu/shaders/bytecode/vulkan_spirv/resolve_full_32bpp_cs.h"
+#include "xenia/gpu/shaders/bytecode/vulkan_spirv/resolve_full_32bpp_fast_cs.h"
 #include "xenia/gpu/shaders/bytecode/vulkan_spirv/resolve_full_32bpp_scaled_cs.h"
+#include "xenia/gpu/shaders/bytecode/vulkan_spirv/resolve_full_32bpp_fast_scaled_cs.h"
 #include "xenia/gpu/shaders/bytecode/vulkan_spirv/resolve_full_64bpp_cs.h"
+#include "xenia/gpu/shaders/bytecode/vulkan_spirv/resolve_full_64bpp_fast_cs.h"
 #include "xenia/gpu/shaders/bytecode/vulkan_spirv/resolve_full_64bpp_scaled_cs.h"
+#include "xenia/gpu/shaders/bytecode/vulkan_spirv/resolve_full_64bpp_fast_scaled_cs.h"
 #include "xenia/gpu/shaders/bytecode/vulkan_spirv/resolve_full_8bpp_cs.h"
+#include "xenia/gpu/shaders/bytecode/vulkan_spirv/resolve_full_8bpp_fast_cs.h"
 #include "xenia/gpu/shaders/bytecode/vulkan_spirv/resolve_full_8bpp_scaled_cs.h"
+#include "xenia/gpu/shaders/bytecode/vulkan_spirv/resolve_full_8bpp_fast_scaled_cs.h"
 #include "xenia/gpu/shaders/bytecode/vulkan_spirv/resolve_inpass_vs.h"
 #include "xenia/gpu/shaders/bytecode/vulkan_spirv/resolve_host_color_inpass_32bpp_tex_ps.h"
 #include "xenia/gpu/shaders/bytecode/vulkan_spirv/resolve_host_color_inpass_64bpp_tex_ps.h"
@@ -198,6 +209,49 @@ const VulkanRenderTargetCache::ResolveCopyShaderCode
          sizeof(shaders::resolve_full_128bpp_cs),
          shaders::resolve_full_128bpp_scaled_cs,
          sizeof(shaders::resolve_full_128bpp_scaled_cs)},
+};
+
+// Same order as kResolveCopyShaders. The fast copies are raw, so only the full
+// entries differ; the fast entries alias the shared ones.
+const VulkanRenderTargetCache::ResolveCopyShaderCode
+    VulkanRenderTargetCache::kResolveCopyShadersFastFormats[size_t(
+        draw_util::ResolveCopyShaderIndex::kCount)] = {
+        {shaders::resolve_fast_32bpp_1x2xmsaa_cs,
+         sizeof(shaders::resolve_fast_32bpp_1x2xmsaa_cs),
+         shaders::resolve_fast_32bpp_1x2xmsaa_scaled_cs,
+         sizeof(shaders::resolve_fast_32bpp_1x2xmsaa_scaled_cs)},
+        {shaders::resolve_fast_32bpp_4xmsaa_cs,
+         sizeof(shaders::resolve_fast_32bpp_4xmsaa_cs),
+         shaders::resolve_fast_32bpp_4xmsaa_scaled_cs,
+         sizeof(shaders::resolve_fast_32bpp_4xmsaa_scaled_cs)},
+        {shaders::resolve_fast_64bpp_1x2xmsaa_cs,
+         sizeof(shaders::resolve_fast_64bpp_1x2xmsaa_cs),
+         shaders::resolve_fast_64bpp_1x2xmsaa_scaled_cs,
+         sizeof(shaders::resolve_fast_64bpp_1x2xmsaa_scaled_cs)},
+        {shaders::resolve_fast_64bpp_4xmsaa_cs,
+         sizeof(shaders::resolve_fast_64bpp_4xmsaa_cs),
+         shaders::resolve_fast_64bpp_4xmsaa_scaled_cs,
+         sizeof(shaders::resolve_fast_64bpp_4xmsaa_scaled_cs)},
+        {shaders::resolve_full_8bpp_fast_cs,
+         sizeof(shaders::resolve_full_8bpp_fast_cs),
+         shaders::resolve_full_8bpp_fast_scaled_cs,
+         sizeof(shaders::resolve_full_8bpp_fast_scaled_cs)},
+        {shaders::resolve_full_16bpp_fast_cs,
+         sizeof(shaders::resolve_full_16bpp_fast_cs),
+         shaders::resolve_full_16bpp_fast_scaled_cs,
+         sizeof(shaders::resolve_full_16bpp_fast_scaled_cs)},
+        {shaders::resolve_full_32bpp_fast_cs,
+         sizeof(shaders::resolve_full_32bpp_fast_cs),
+         shaders::resolve_full_32bpp_fast_scaled_cs,
+         sizeof(shaders::resolve_full_32bpp_fast_scaled_cs)},
+        {shaders::resolve_full_64bpp_fast_cs,
+         sizeof(shaders::resolve_full_64bpp_fast_cs),
+         shaders::resolve_full_64bpp_fast_scaled_cs,
+         sizeof(shaders::resolve_full_64bpp_fast_scaled_cs)},
+        {shaders::resolve_full_128bpp_fast_cs,
+         sizeof(shaders::resolve_full_128bpp_fast_cs),
+         shaders::resolve_full_128bpp_fast_scaled_cs,
+         sizeof(shaders::resolve_full_128bpp_fast_scaled_cs)},
 };
 
 // Each entry expands to {code, sizeof(code), "code"} for one generated SPIR-V
@@ -839,12 +893,15 @@ bool VulkanRenderTargetCache::Initialize(uint32_t shared_memory_binding_count) {
   }
 
   // Resolve copy pipelines.
+  XELOGI("Resolve copy shaders: {} number-format variants",
+         cvars::accurate_resolve_number_formats ? "ACCURATE" : "FAST");
   for (size_t i = 0; i < size_t(draw_util::ResolveCopyShaderIndex::kCount);
        ++i) {
     const draw_util::ResolveCopyShaderInfo& resolve_copy_shader_info =
         draw_util::resolve_copy_shader_info[i];
     const ResolveCopyShaderCode& resolve_copy_shader_code =
-        kResolveCopyShaders[i];
+        cvars::accurate_resolve_number_formats ? kResolveCopyShaders[i]
+                                               : kResolveCopyShadersFastFormats[i];
     // Somewhat verification whether resolve_copy_shaders_ is up to date.
     assert_true(resolve_copy_shader_code.unscaled &&
                 resolve_copy_shader_code.unscaled_size_bytes &&

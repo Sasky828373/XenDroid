@@ -597,82 +597,73 @@ uint XeResolveEdramPixelStrideBytes(XeResolveInfo resolve_info) {
     // 8_8_8_8_GAMMA resolves average the encoded bytes directly (5345085D,
     // 45410934), so we decode before MSAA averaging and encode again only
     // for compatible 8_8_8_8 destinations.
+    // The PWL segment is derived arithmetically instead of by nested
+    // branches: the four segments scale by 1/2/4/8 and offset by
+    // 0/-64/-256/-1024, so counting thresholds passed gives both. Inlined per
+    // component per sample, where live branch bodies cost occupancy.
+#define XE_PWL_GAMMA_TO_LINEAR_BODY(vec_float, splat)                     \
+      gamma = saturate_xe(gamma);                                         \
+      vec_float past_first = step(splat(64.0f / 255.0f), gamma);          \
+      vec_float segment = past_first +                                    \
+                          step(splat(96.0f / 255.0f), gamma) +            \
+                          step(splat(192.0f / 255.0f), gamma);            \
+      vec_float scale = exp2(segment) * splat(1.0f / 1024.0f);            \
+      vec_float offset = splat(-16.0f) * exp2(segment + segment) *        \
+                         past_first;                                      \
+      vec_float linear_value =                                            \
+          gamma * splat(255.0f * 1024.0f) * scale + offset;               \
+      linear_value += trunc(linear_value * scale);                        \
+      return linear_value * splat(1.0f / 1023.0f);
+
     float XePWLGammaToLinear(float gamma) {
-      gamma = saturate_xe(gamma);
-      float scale;
-      float offset;
-      if (gamma >= 96.0f / 255.0f) {
-        if (gamma >= 192.0f / 255.0f) {
-          scale = 8.0f / 1024.0f;
-          offset = -1024.0f;
-        } else {
-          scale = 4.0f / 1024.0f;
-          offset = -256.0f;
-        }
-      } else {
-        if (gamma >= 64.0f / 255.0f) {
-          scale = 2.0f / 1024.0f;
-          offset = -64.0f;
-        } else {
-          scale = 1.0f / 1024.0f;
-          offset = 0.0f;
-        }
-      }
-      float linear_value = gamma * (255.0f * 1024.0f) * scale + offset;
-      linear_value += trunc(linear_value * scale);
-      return linear_value * (1.0f / 1023.0f);
+      XE_PWL_GAMMA_TO_LINEAR_BODY(float, float)
     }
 
     float3_xe XePWLGammaToLinear3(float3_xe gamma) {
-      return float3_xe(XePWLGammaToLinear(gamma.x),
-                       XePWLGammaToLinear(gamma.y),
-                       XePWLGammaToLinear(gamma.z));
+      XE_PWL_GAMMA_TO_LINEAR_BODY(float3_xe, float_x3_xe)
     }
 
     float4_xe XePWLGammaToLinear4(float4_xe gamma) {
-      return float4_xe(XePWLGammaToLinear(gamma.x),
-                       XePWLGammaToLinear(gamma.y),
-                       XePWLGammaToLinear(gamma.z),
-                       XePWLGammaToLinear(gamma.w));
+      XE_PWL_GAMMA_TO_LINEAR_BODY(float4_xe, float_x4_xe)
     }
 
+    // Inverse of the above, same segment-counting trick: scales are
+    // 1023/1/2/4/8 and offsets 0/32/64/128 over 255.
+#define XE_LINEAR_TO_PWL_GAMMA_BODY(vec_float, splat)                      \
+      linear_value = saturate_xe(linear_value);                            \
+      vec_float past_first = step(splat(64.0f / 1023.0f), linear_value);   \
+      vec_float segment = past_first +                                     \
+                          step(splat(128.0f / 1023.0f), linear_value) +    \
+                          step(splat(512.0f / 1023.0f), linear_value);     \
+      vec_float scale = splat(1023.0f) * exp2(-segment);                   \
+      vec_float offset =                                                   \
+          splat(16.0f / 255.0f) * exp2(segment) * past_first;              \
+      return trunc(linear_value * scale) * splat(1.0f / 255.0f) + offset;
+
     float XeLinearToPWLGamma(float linear_value) {
-      linear_value = saturate_xe(linear_value);
-      float scale;
-      float offset;
-      if (linear_value >= 128.0f / 1023.0f) {
-        if (linear_value >= 512.0f / 1023.0f) {
-          scale = 1023.0f / 8.0f;
-          offset = 128.0f / 255.0f;
-        } else {
-          scale = 1023.0f / 4.0f;
-          offset = 64.0f / 255.0f;
-        }
-      } else {
-        if (linear_value >= 64.0f / 1023.0f) {
-          scale = 1023.0f / 2.0f;
-          offset = 32.0f / 255.0f;
-        } else {
-          scale = 1023.0f;
-          offset = 0.0f;
-        }
-      }
-      return trunc(linear_value * scale) * (1.0f / 255.0f) + offset;
+      XE_LINEAR_TO_PWL_GAMMA_BODY(float, float)
     }
 
     float3_xe XeLinearToPWLGamma3(float3_xe linear_value) {
-      return float3_xe(XeLinearToPWLGamma(linear_value.x),
-                       XeLinearToPWLGamma(linear_value.y),
-                       XeLinearToPWLGamma(linear_value.z));
+      XE_LINEAR_TO_PWL_GAMMA_BODY(float3_xe, float_x3_xe)
     }
 
     bool XeResolveSourceUsesPWLGamma(XeResolveInfo resolve_info) {
+      #ifdef XE_RESOLVE_FAST_FORMATS
+        // Constant false so every gamma decode/encode path below is dead code
+        // and never reaches the compiled shader.
+        return false;
+      #else
       return resolve_info.decode_pwl_gamma &&
              resolve_info.edram_format ==
                  kXenosColorRenderTargetFormat_8_8_8_8_GAMMA;
+      #endif
     }
 
     bool XeResolveDestStoresPWLGamma(XeResolveInfo resolve_info) {
+      #ifdef XE_RESOLVE_FAST_FORMATS
+        return false;
+      #else
       // Resolve constants don't carry a destination gamma bit. Treat an
       // unsigned 8_8_8_8 destination as PWL gamma storage.
       bool dest_number_is_unorm =
@@ -684,6 +675,7 @@ uint XeResolveEdramPixelStrideBytes(XeResolveInfo resolve_info) {
           resolve_info.dest_format ==
               kXenosFormat_8_8_8_8_AS_16_16_16_16;
       return dest_number_is_unorm && dest_is_8888;
+      #endif
     }
 
     void XeResolvePWLGammaToLinearRGB(inout_param_xe(float4_xe, pixel)) {

@@ -129,6 +129,17 @@ uint XePackFixed(float value, uint bits, uint num_format) {
 // bodies: it is uniform, so those terms hoist and only one arithmetic path is
 // emitted. Keeping every path live costs registers and occupancy on tiled GPUs
 // even when the branch is never taken.
+#ifdef XE_RESOLVE_FAST_FORMATS
+// Fast resolve variants: destinations are treated as unsigned fractions, which
+// is what the emulator assumed before the number format was honoured. Emitting
+// only this path keeps the resolve shaders small - the alternatives cost
+// registers and occupancy even when never taken.
+#define XE_PACK_FIXED_BODY(vec_float, vec_uint, vec_int, splat_float, \
+                           splat_uint, ones)                          \
+  vec_uint unsigned_max = (splat_uint(1u) << bits) - ones;            \
+  return vec_uint(saturate_xe(f) * vec_float(unsigned_max) +          \
+                  splat_float(0.5f));
+#else
 #define XE_PACK_FIXED_BODY(vec_float, vec_uint, vec_int, splat_float, \
                            splat_uint, ones)                          \
   vec_uint unsigned_max = (splat_uint(1u) << bits) - ones;            \
@@ -155,6 +166,8 @@ uint XePackFixed(float value, uint bits, uint num_format) {
       scaled + select_xe(greater_than_equal_xe(scaled, splat_float(0.0f)), \
                          splat_float(0.5f), splat_float(-0.5f));      \
   return vec_uint(vec_int(rounded)) & unsigned_max;
+
+#endif  // XE_RESOLVE_FAST_FORMATS
 
 uint4_xe XePackFixed4(float4_xe f, uint4_xe bits, uint num_format) {
   XE_PACK_FIXED_BODY(float4_xe, uint4_xe, int4_xe, float_x4_xe, uint_x4_xe,

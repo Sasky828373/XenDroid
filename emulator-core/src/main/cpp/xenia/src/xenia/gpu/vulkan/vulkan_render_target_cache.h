@@ -384,6 +384,10 @@ class VulkanRenderTargetCache final : public RenderTargetCache {
   VkPipelineLayout resolve_copy_pipeline_layout_ = VK_NULL_HANDLE;
   static const ResolveCopyShaderCode
       kResolveCopyShaders[size_t(draw_util::ResolveCopyShaderIndex::kCount)];
+  // Same layout, but the full-resolve entries drop destination number format
+  // and PWL gamma handling. Selected by accurate_resolve_number_formats.
+  static const ResolveCopyShaderCode kResolveCopyShadersFastFormats[size_t(
+      draw_util::ResolveCopyShaderIndex::kCount)];
   std::array<VkPipeline, size_t(draw_util::ResolveCopyShaderIndex::kCount)>
       resolve_copy_pipelines_{};
   // Unscaled variants for fully native resolves. Only created with resolution

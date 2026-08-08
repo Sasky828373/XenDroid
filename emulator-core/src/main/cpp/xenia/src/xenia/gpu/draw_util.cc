@@ -48,6 +48,19 @@ DEFINE_bool(
 UPDATE_from_bool(resolve_check_number_format, 2026, 7, 30, 12, false);
 
 DEFINE_bool(
+    accurate_resolve_number_formats, false,
+    "Handle signed/integer resolve destination number formats and decode "
+    "8_8_8_8_GAMMA sources through the PWL curve during resolves.\n"
+    "Both are accuracy features that only a handful of titles need, but they "
+    "are compiled into every full resolve shader, and the unused code costs "
+    "registers and occupancy on mobile GPUs even when it never runs - "
+    "measured at roughly a third of the frame rate in a resolve-heavy title.\n"
+    "Off uses lean resolve shaders that treat destinations as unsigned "
+    "fractions, which is what the emulator did before. Enable only for a "
+    "title with wrong resolve colours or gamma blowout.",
+    "GPU");
+
+DEFINE_bool(
     resolve_copy_dest_number_packing, true,
     "Pack full-resolve fixed destinations according to copy_dest_number "
     "instead of assuming an unsigned fraction.\n"

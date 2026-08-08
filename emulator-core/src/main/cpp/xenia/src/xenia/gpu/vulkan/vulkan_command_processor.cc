@@ -7,6 +7,8 @@
  ******************************************************************************
  */
 
+#include <set>
+
 #include "xenia/gpu/vulkan/vulkan_command_processor.h"
 
 #include <atomic>
@@ -43,6 +45,17 @@
 DECLARE_bool(clear_memory_page_state);
 DECLARE_bool(vulkan_in_pass_resolve_debug_read_usage);
 DECLARE_bool(log_gpu_frame_time_breakdown);
+
+DEFINE_bool(
+    render_area_dirty_extent, false,
+    "Shrink each render pass's area to the region its draws actually touch.\n"
+    "Host render targets span the whole EDRAM range for their pitch, so a "
+    "narrow one is thousands of rows tall. SHELVED: measured on Adreno 650 / "
+    "Turnip this changes nothing - shrinking 80x8192 to 32x32 left pass times "
+    "and the RB/CCU/UBWC counters identical, so the driver was already skipping "
+    "the empty tiles rather than binning them. Kept for other drivers and as "
+    "groundwork; off by default because it buys nothing here.",
+    "GPU");
 
 DEFINE_int32(
     vulkan_mid_frame_submission_draws, 1300,
@@ -2250,12 +2263,14 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
           const bool transfer = (key & 0x80000000u) != 0;
           XELOGI(
               "VkPassTime: {}{}x{} : {:.2f}ms/fr ({:.1f}pass {:.0f}draw/fr, "
-              "{:.3f}ms ea)",
+              "{:.3f}ms ea) scissor<={}x{} viewport<={}x{}",
               transfer ? "xfer " : "", (key >> 16) & 0x7FFF, key & 0xFFFF,
               kv.second.ns / f / 1e6, kv.second.passes / f, kv.second.draws / f,
               kv.second.passes
                   ? kv.second.ns / static_cast<double>(kv.second.passes) / 1e6
-                  : 0.0);
+                  : 0.0,
+              kv.second.max_scissor_w, kv.second.max_scissor_h,
+              kv.second.max_viewport_w, kv.second.max_viewport_h);
         }
         pass_bucket_stats_.clear();
       }
@@ -3068,6 +3083,10 @@ void VulkanCommandProcessor::OpenPassTimestamp(uint32_t bucket_key) {
   pass_ts_open_pair_ = pair;
   pass_ts_open_submission_ = pass_ts_submission_;
   pass_open_draws_ = 0;
+  pass_open_scissor_w_ = 0;
+  pass_open_scissor_h_ = 0;
+  pass_open_viewport_w_ = 0;
+  pass_open_viewport_h_ = 0;
 }
 
 void VulkanCommandProcessor::ClosePassTimestamp() {
@@ -3086,6 +3105,12 @@ void VulkanCommandProcessor::ClosePassTimestamp() {
       VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, pass_timestamp_pool_,
       pass_ts_open_pair_ * 2 + 1);
   pass_ts_draws_[pass_ts_open_pair_] = pass_open_draws_;
+  pass_ts_scissor_[pass_ts_open_pair_] =
+      (std::min(pass_open_scissor_w_, 0xFFFFu) << 16) |
+      std::min(pass_open_scissor_h_, 0xFFFFu);
+  pass_ts_viewport_[pass_ts_open_pair_] =
+      (std::min(pass_open_viewport_w_, 0xFFFFu) << 16) |
+      std::min(pass_open_viewport_h_, 0xFFFFu);
   ++pass_ts_count_;
   pass_ts_open_pair_ = UINT32_MAX;
 }
@@ -3122,6 +3147,17 @@ void VulkanCommandProcessor::SubmitBarriersAndEnterRenderTargetCacheRenderPass(
   current_render_pass_ = use_dynamic_rendering ? VK_NULL_HANDLE : render_pass;
   current_framebuffer_ = framebuffer;
   ++vk_frame_sync_stats_.render_pass_begins;
+  // Identify each pass bucket once by the guest render targets behind it.
+  if (cvars::log_gpu_frame_time_breakdown) {
+    const uint32_t bucket = (uint32_t(framebuffer->host_extent.width) << 16) |
+                            uint32_t(framebuffer->host_extent.height);
+    static std::set<uint32_t> logged_buckets;
+    if (logged_buckets.emplace(bucket).second) {
+      XELOGI("VkPassId: {}x{} <- {}", framebuffer->host_extent.width,
+             framebuffer->host_extent.height,
+             render_target_cache_->GetLastUpdateRenderTargetsDebugName());
+    }
+  }
   OpenPassTimestamp((uint32_t(framebuffer->host_extent.width) << 16) |
                     framebuffer->host_extent.height);
 
@@ -3307,6 +3343,20 @@ void VulkanCommandProcessor::EndRenderPass() {
     if (zpd_active_segment_.logical_active) {
       zpd_active_segment_.segment_pending_begin = true;
     }
+  }
+  // Shrink the render area to what the pass's draws actually touched, now that
+  // they have all been recorded. A host render target spans the whole EDRAM
+  // range for its pitch (a 2-tile-wide one is 8192 rows tall), and on a tiler
+  // the render area drives tile binning and GMEM load/store - not just
+  // clipping - so the unshrunk area costs far more than the draws do.
+  if (cvars::render_area_dirty_extent) {
+    // Rounded up to a coarse bin-friendly quantum rather than the exact
+    // vkGetRenderAreaGranularity: a non-aligned render area is legal, the
+    // alignment only helps the driver's binning, and the win here is 8192 rows
+    // becoming ~135 - the rounding is noise against that.
+    constexpr uint32_t kRenderAreaAlign = 32;
+    deferred_command_buffer_.ShrinkRenderAreaToDrawn(kRenderAreaAlign,
+                                                     kRenderAreaAlign);
   }
   // Use current_render_pass_ to determine which end command to use.
   // VK_NULL_HANDLE means we used dynamic rendering, otherwise traditional.
@@ -4683,6 +4733,21 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   ++vk_frame_sync_stats_.draws;
   if (pass_ts_open_pair_ != UINT32_MAX) {
     ++pass_open_draws_;
+    pass_open_scissor_w_ =
+        std::max(pass_open_scissor_w_,
+                 uint32_t(std::max(0, dynamic_scissor_.offset.x)) +
+                     dynamic_scissor_.extent.width);
+    pass_open_scissor_h_ =
+        std::max(pass_open_scissor_h_,
+                 uint32_t(std::max(0, dynamic_scissor_.offset.y)) +
+                     dynamic_scissor_.extent.height);
+    pass_open_viewport_w_ = std::max(
+        pass_open_viewport_w_,
+        uint32_t(std::max(0.0f, dynamic_viewport_.x + dynamic_viewport_.width)));
+    pass_open_viewport_h_ =
+        std::max(pass_open_viewport_h_,
+                 uint32_t(std::max(0.0f, dynamic_viewport_.y +
+                                             std::abs(dynamic_viewport_.height))));
   }
   if (cvars::vulkan_mid_frame_submission_draws > 0 &&
       draws_since_submission_ >=
@@ -5937,6 +6002,14 @@ void VulkanCommandProcessor::CheckSubmissionCompletionAndDeviceLoss(
               bucket.ns += uint64_t((p1 - p0) * period_ns);
               bucket.passes++;
               bucket.draws += pass_ts_draws_[pair];
+              bucket.max_scissor_w =
+                  std::max(bucket.max_scissor_w, pass_ts_scissor_[pair] >> 16);
+              bucket.max_scissor_h = std::max(bucket.max_scissor_h,
+                                              pass_ts_scissor_[pair] & 0xFFFF);
+              bucket.max_viewport_w = std::max(bucket.max_viewport_w,
+                                               pass_ts_viewport_[pair] >> 16);
+              bucket.max_viewport_h = std::max(
+                  bucket.max_viewport_h, pass_ts_viewport_[pair] & 0xFFFF);
             }
           }
         }

@@ -117,6 +117,10 @@ class VulkanRenderTargetCache final : public RenderTargetCache {
 
   void CompletedSubmissionUpdated();
   void EndSubmission();
+  // Debug names of the guest render targets backing the last update, for
+  // identifying a render pass bucket in the frame-time breakdown.
+  std::string GetLastUpdateRenderTargetsDebugName() const;
+
 
   // Called once per guest frame (from IssueSwap) to aggregate and, once per
   // second, log the resolve classification when log_resolve_details is set.

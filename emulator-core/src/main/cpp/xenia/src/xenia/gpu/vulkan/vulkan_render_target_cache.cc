@@ -174,6 +174,23 @@ namespace shaders {
 #include "xenia/gpu/shaders/vulkan_direct_host_resolve_bytecode.h"
 }  // namespace shaders
 
+std::string VulkanRenderTargetCache::GetLastUpdateRenderTargetsDebugName()
+    const {
+  RenderTarget* const* rts = last_update_accumulated_render_targets();
+  std::string names;
+  for (uint32_t i = 0; i < 1 + xenos::kMaxColorRenderTargets; ++i) {
+    if (!rts[i]) {
+      continue;
+    }
+    if (!names.empty()) {
+      names += " | ";
+    }
+    names += (i == 0 ? "depth " : fmt::format("color{} ", i - 1));
+    names += rts[i]->key().GetDebugName();
+  }
+  return names.empty() ? std::string("(none)") : names;
+}
+
 const VulkanRenderTargetCache::ResolveCopyShaderCode
     VulkanRenderTargetCache::kResolveCopyShaders[size_t(
         draw_util::ResolveCopyShaderIndex::kCount)] = {

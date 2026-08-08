@@ -749,10 +749,29 @@ class VulkanCommandProcessor final : public CommandProcessor {
                            kPassTimestampRingSubmissions>
       pass_ts_draws_{};
   uint32_t pass_open_draws_ = 0;
+  // Largest scissor corner seen among the draws of the currently open pass -
+  // the region actually touched, as opposed to the full EDRAM-derived
+  // framebuffer the render area is set to.
+  uint32_t pass_open_scissor_w_ = 0;
+  uint32_t pass_open_scissor_h_ = 0;
+  // Same for the viewport, which bounds the draw even when the guest leaves
+  // the scissor wide open.
+  uint32_t pass_open_viewport_w_ = 0;
+  uint32_t pass_open_viewport_h_ = 0;
+  std::array<uint32_t, size_t(kPassTimestampPairsPerSubmission) *
+                           kPassTimestampRingSubmissions>
+      pass_ts_scissor_{};
+  std::array<uint32_t, size_t(kPassTimestampPairsPerSubmission) *
+                           kPassTimestampRingSubmissions>
+      pass_ts_viewport_{};
   struct PassBucketStat {
     uint64_t ns = 0;
     uint64_t passes = 0;
     uint64_t draws = 0;
+    uint32_t max_scissor_w = 0;
+    uint32_t max_scissor_h = 0;
+    uint32_t max_viewport_w = 0;
+    uint32_t max_viewport_h = 0;
   };
   // Accumulated per bucket key since the last report.
   std::map<uint32_t, PassBucketStat> pass_bucket_stats_;

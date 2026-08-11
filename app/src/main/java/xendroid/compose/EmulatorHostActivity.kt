@@ -42,9 +42,6 @@ import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Button
-import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.DisposableEffect
@@ -63,6 +60,10 @@ import xendroid.compose.ui.disc.DiscSwapPanel
 import xendroid.compose.ui.keyboard.GuestKeyboardPanel
 import xendroid.compose.ui.keyboard.clampToUtf16Units
 import xendroid.compose.ui.messagebox.GuestMessageBoxPanel
+import xendroid.compose.ui.pause.PAUSE_OPTION_COUNT
+import xendroid.compose.ui.pause.PAUSE_OPTION_QUIT
+import xendroid.compose.ui.pause.PAUSE_OPTION_RESUME
+import xendroid.compose.ui.pause.PauseMenuPanel
 import xendroid.compose.ui.theme.xendroidTheme
 import xendroid.compose.gamepad.GamepadConfigDto
 import xendroid.compose.gamepad.GamepadController
@@ -402,17 +403,17 @@ class EmulatorHostActivity : ComponentActivity(), SurfaceHolder.Callback {
                     messageBoxRequestState.value?.let { answerMessageBox(it.activeButton) }
                 }
                 BackHandler(enabled = !menuOpen && !keyboardOpen && !discOpen && !messageBoxOpen) {
+                    panelSelectedState.intValue = PAUSE_OPTION_RESUME
                     menuOpenState.value = true
                     if (session.booted) session.pause()
                 }
+                BackHandler(enabled = menuOpen) { closeMenuAndResume() }
                 if (menuOpen) xendroidTheme {
-                    AlertDialog(
-                        onDismissRequest = {
-                            menuOpenState.value = false
-                            if (session.booted) session.resumeIfPaused()
-                        },
-                        title = { Text("Paused") },
-                        confirmButton = { Button(onClick = { finish() }) { Text("Quit") } },
+                    PauseMenuPanel(
+                        selected = panelSelectedState.intValue,
+                        onResume = { closeMenuAndResume() },
+                        onQuit = { finish() },
+                        modifier = Modifier.fillMaxSize(),
                     )
                 }
             }
@@ -688,7 +689,18 @@ class EmulatorHostActivity : ComponentActivity(), SurfaceHolder.Callback {
                 { i -> if (i == 0) acceptKeyboard(keyboardTextState.value) else cancelKeyboard() },
                 { cancelKeyboard() })
         }
+        // Last: a guest prompt opened over the menu owns the input until it is answered.
+        if (menuOpenState.value) {
+            return PanelNav(PAUSE_OPTION_COUNT,
+                { i -> if (i == PAUSE_OPTION_QUIT) finish() else closeMenuAndResume() },
+                { closeMenuAndResume() })
+        }
         return null
+    }
+
+    private fun closeMenuAndResume() {
+        menuOpenState.value = false
+        if (session.booted) session.resumeIfPaused()
     }
 
     private fun isPanelKey(keyCode: Int): Boolean = when (keyCode) {

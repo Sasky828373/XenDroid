@@ -43,7 +43,7 @@ fun PauseMenuPanel(
             .background(Color.Black.copy(alpha = 0.6f))
             // Swallow taps meant for the game surface underneath.
             .pointerInput(Unit) { awaitPointerEventScope { while (true) awaitPointerEvent() } },
-        contentAlignment = Alignment.TopCenter,
+        contentAlignment = Alignment.Center,
     ) {
         val compact = maxHeight < 400.dp
         val outerPadding = if (compact) 8.dp else 24.dp

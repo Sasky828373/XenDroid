@@ -65,17 +65,40 @@ int AdrenoGeneration() {
   return model_digits ? atoi(model_digits) / 100 : 0;
 }
 
-bool SystemPropertySet(const char* name) {
+std::string SystemProperty(const char* name) {
   char value[PROP_VALUE_MAX] = {};
-  return __system_property_get(name, value) > 0 && value[0] != '\0';
+  int length = __system_property_get(name, value);
+  return length > 0 ? std::string(value, size_t(length)) : std::string();
 }
 
-// Keyed on each skin's own version property, not the manufacturer: a Samsung or Xiaomi
-// device running stock or custom Android does not need the hint.
+// The version property each skin sets. Keyed on these rather than the manufacturer, so a
+// Samsung or Xiaomi device running stock or custom Android is not matched.
+constexpr const char* kVendorOsProperties[] = {
+    "ro.build.version.oneui",     // Samsung One UI
+    "ro.mi.os.version.name",      // Xiaomi HyperOS
+    "ro.mi.os.version.code",
+    "ro.miui.ui.version.name",    // Xiaomi MIUI
+    "ro.miui.ui.version.code",
+};
+
+// Logs every property it reads, including the empty ones, so a device that needs the hint
+// but is not matched here can be identified from its own log rather than a repro session.
 bool IsVendorOsNeedingUbwcFlagHint() {
-  return SystemPropertySet("ro.build.version.oneui") ||
-         SystemPropertySet("ro.mi.os.version.name") ||
-         SystemPropertySet("ro.miui.ui.version.name");
+  std::string report;
+  bool matched = false;
+  for (const char* name : kVendorOsProperties) {
+    std::string value = SystemProperty(name);
+    if (!value.empty()) {
+      matched = true;
+    }
+    report += fmt::format(" {}='{}'", name, value);
+  }
+  XELOGI("Vendor OS probe: {} {} ({}){} -> UBWC flag hint {}",
+         SystemProperty("ro.product.manufacturer"),
+         SystemProperty("ro.product.model"),
+         SystemProperty("ro.build.version.release"), report,
+         matched ? "needed" : "not needed");
+  return matched;
 }
 
 }  // namespace
@@ -179,8 +202,11 @@ std::unique_ptr<VulkanInstance> VulkanInstance::Create(
     }
     // One UI and HyperOS/MIUI: their framebuffer stack needs the UBWC flag hint for
     // Turnip to sample rendered images correctly.
+    // Probed unconditionally: the log has to show what the device reported even when the
+    // cvar overrides the decision.
+    const bool needs_ubwc_flag_hint = IsVendorOsNeedingUbwcFlagHint();
     std::string fd_features = cvars::fd_dev_features;
-    if (fd_features.empty() && IsVendorOsNeedingUbwcFlagHint()) {
+    if (fd_features.empty() && needs_ubwc_flag_hint) {
       fd_features = "enable_tp_ubwc_flag_hint=1";
     }
     if (!fd_features.empty() && fd_features != "none") {

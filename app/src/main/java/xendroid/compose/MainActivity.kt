@@ -19,6 +19,8 @@ import xendroid.compose.ui.library.EXTRA_GAME_URI
 import xendroid.compose.core.SessionLogs
 import xendroid.compose.ui.AppNavHost
 import xendroid.compose.ui.theme.xendroidTheme
+import xendroid.compose.settings.ConfigStore
+import xendroid.compose.settings.seedTouchOverlayDefault
 import xendroid.compose.updater.CooldownDialog
 import xendroid.compose.updater.getRemainingCooldown
 import xendroid.compose.updater.LatestVersionDialog
@@ -64,6 +66,8 @@ class MainActivity : ComponentActivity() {
 
                 // Pre-warm so settings doesn't pay the delay-load System.loadLibrary.
                 runCatching { EmulatorRuntime.ensureLoaded() }
+                // Needs the native config, so it follows ensureLoaded on this same thread.
+                runCatching { seedTouchOverlayDefault(appContext, ConfigStore(appContext)) }
             }
         }
 

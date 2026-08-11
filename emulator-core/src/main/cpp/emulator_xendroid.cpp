@@ -1110,6 +1110,7 @@ static void j_setup_uri_info_list_file(JNIEnv* env,jobject self,jstring jpath ){
 
 // Toggled by the "Display|show_debug_overlay" cvar (defined in presenter.cc).
 DECLARE_bool(show_debug_overlay);
+DECLARE_bool(show_touch_overlay);
 
 // Returns the formatted overlay text, or null when the overlay is disabled so
 // the Java side can simply hide the view. Polled (~4 Hz) from the UI thread;
@@ -1166,6 +1167,18 @@ static jdouble j_average_fps(JNIEnv* env, jobject thiz) {
 // read-only bool; safe from any thread.
 static jboolean j_show_debug_overlay_enabled(JNIEnv* env, jobject thiz) {
     return cvars::show_debug_overlay ? JNI_TRUE : JNI_FALSE;
+}
+
+// EFFECTIVE HID|show_touch_overlay, polled like show_debug_overlay above so a per-game
+// override applied during module load is seen after boot.
+static jboolean j_show_touch_overlay_enabled(JNIEnv* env, jobject thiz) {
+    return cvars::show_touch_overlay ? JNI_TRUE : JNI_FALSE;
+}
+
+// Flips the live cvar so the pause-menu toggle takes effect on the next poll; the caller
+// persists it to the config separately.
+static void j_set_show_touch_overlay(JNIEnv* env, jobject thiz, jboolean value) {
+    cvars::show_touch_overlay = value == JNI_TRUE;
 }
 
 //public native int compressIsoToZar(String isoPath,String outZarPath);
@@ -1709,6 +1722,8 @@ int register_xendroid_Emulator(JNIEnv* env){
             ,{"average_fps", "()D", (void *) j_average_fps}
             ,{"last_frame_time_ms", "()D", (void *) j_last_frame_time_ms}
             ,{"show_debug_overlay_enabled", "()Z", (void *) j_show_debug_overlay_enabled}
+            ,{"show_touch_overlay_enabled", "()Z", (void *) j_show_touch_overlay_enabled}
+            ,{"set_show_touch_overlay", "(Z)V", (void *) j_set_show_touch_overlay}
             ,{"compressIsoToZar", "(Ljava/lang/String;Ljava/lang/String;)I", (void *) j_compressIsoToZar}
             ,{"compressProgress", "()F", (void *) j_compressProgress}
             ,{"install_content", "(Ljava/lang/String;Ljava/lang/String;)I", (void *) j_install_content}

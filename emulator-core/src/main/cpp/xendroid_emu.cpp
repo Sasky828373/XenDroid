@@ -67,6 +67,10 @@ DEFINE_bool(android_message_box, true,
             "UI");
 DEFINE_string(hid, "android", "Input system. Use: [android, nop]",
               "HID");
+DEFINE_bool(show_touch_overlay, true,
+            "Draw the on-screen controller. Seeded on first launch from whether "
+            "a physical controller was attached, and honoured as-is after that.",
+            "HID");
 
 DEFINE_path(
         storage_root, "",

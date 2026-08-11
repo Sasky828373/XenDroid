@@ -96,6 +96,10 @@ object SettingsSchema {
             b("Kernel", "kernel_debug_monitor", "Kernel debug monitor", false),
         )),
 
+        SettingsCategory("Controller", listOf(
+            b("HID", "show_touch_overlay", "Show on-screen controller", true),
+        )),
+
         SettingsCategory("HID", listOf(
             l("HID", "hid", "HID backend", "android",
                 "android" to "android", "nop" to "nop"),

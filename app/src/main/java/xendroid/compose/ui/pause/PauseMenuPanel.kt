@@ -20,9 +20,10 @@ import xendroid.compose.ui.panel.GuestPanelOption
 import xendroid.compose.ui.panel.GuestPanelOptionsRow
 
 /** Option order, mirrored by the host's PanelNav so the controller and the touch UI agree. */
-const val PAUSE_OPTION_RESUME = 0
-const val PAUSE_OPTION_QUIT = 1
-const val PAUSE_OPTION_COUNT = 2
+const val PAUSE_OPTION_TOUCH_OVERLAY = 0
+const val PAUSE_OPTION_RESUME = 1
+const val PAUSE_OPTION_QUIT = 2
+const val PAUSE_OPTION_COUNT = 3
 
 /**
  * The in-game menu, styled as the guest prompt panels (keyboard, disc swap, message box) so
@@ -33,6 +34,8 @@ const val PAUSE_OPTION_COUNT = 2
 @Composable
 fun PauseMenuPanel(
     selected: Int,
+    touchOverlayShown: Boolean,
+    onToggleTouchOverlay: () -> Unit,
     onResume: () -> Unit,
     onQuit: () -> Unit,
     modifier: Modifier = Modifier,
@@ -60,7 +63,13 @@ fun PauseMenuPanel(
             Column(Modifier.padding(innerPadding)) {
                 Text("Paused", style = MaterialTheme.typography.titleMedium)
 
-                GuestPanelOptionsRow(Modifier.padding(top = if (compact) 8.dp else 16.dp)) {
+                GuestPanelOption(
+                    label = if (touchOverlayShown) "Hide controls" else "Show controls",
+                    selected = selected == PAUSE_OPTION_TOUCH_OVERLAY,
+                    onClick = onToggleTouchOverlay,
+                    modifier = Modifier.padding(top = if (compact) 8.dp else 16.dp),
+                )
+                GuestPanelOptionsRow(Modifier.padding(top = 8.dp)) {
                     GuestPanelOption(
                         label = "Resume",
                         selected = selected == PAUSE_OPTION_RESUME,

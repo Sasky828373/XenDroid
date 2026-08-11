@@ -10,6 +10,7 @@ object SettingDescriptions {
         "allow_plugins" to "Allows loading homebrew plugin/trainer XEX modules per title; experimental",
         "android_message_box" to "Shows a game's own prompts (Xbox LIVE sign-in, save confirmations) as a dialog you answer. With this off the game is answered with whichever button it pre-selected",
         "android_soft_keyboard" to "Pops up the Android keyboard when a game asks you to type (gamertags, save names). With this off the game is answered with its own default text",
+        "show_touch_overlay" to "Draw the on-screen controller while playing. Starts off when a physical controller was attached on first launch, on when none was",
         "apply_patches" to "Applies user patch files to games when they load",
         "apply_title_update" to "Applies installed title updates when launching a game",
         "apu" to "Audio output backend to use (AAudio, OpenSL ES, or no audio)",

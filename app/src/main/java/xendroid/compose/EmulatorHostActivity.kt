@@ -61,7 +61,9 @@ import xendroid.compose.ui.keyboard.GuestKeyboardPanel
 import xendroid.compose.ui.keyboard.clampToUtf16Units
 import xendroid.compose.ui.messagebox.GuestMessageBoxPanel
 import xendroid.compose.ui.pause.PAUSE_OPTION_COUNT
+import xendroid.compose.settings.ConfigStore
 import xendroid.compose.ui.pause.PAUSE_OPTION_QUIT
+import xendroid.compose.ui.pause.PAUSE_OPTION_TOUCH_OVERLAY
 import xendroid.compose.ui.pause.PAUSE_OPTION_RESUME
 import xendroid.compose.ui.pause.PauseMenuPanel
 import xendroid.compose.ui.theme.xendroidTheme
@@ -72,7 +74,6 @@ import xendroid.compose.gamepad.Kc
 import xendroid.compose.gamepad.rememberAutoHide
 import xendroid.compose.data.GameButtons
 import xendroid.compose.data.KeymapStore
-import xendroid.compose.settings.ConfigStore
 
 /**
  * The :emu emulator host (separate process; see manifest). Reads game_uri from the Intent,
@@ -121,6 +122,7 @@ class EmulatorHostActivity : ComponentActivity(), SurfaceHolder.Callback {
     private var hapticsEnabled = false
     private val bootedState = mutableStateOf(false)
     private val showFpsOverlay = mutableStateOf(false) // Display|show_debug_overlay (native TOML config)
+    private val showTouchOverlay = mutableStateOf(true)  // HID|show_touch_overlay
     private val menuOpenState = mutableStateOf(false)
     private val keyboardRequestState =
         mutableStateOf<Emulator.KeyboardRequest?>(null)
@@ -258,7 +260,8 @@ class EmulatorHostActivity : ComponentActivity(), SurfaceHolder.Callback {
                 val alpha by animateFloatAsState(
                     if (visible) cfg.globals.opacity else 0f, tween(500), label = "padAlpha")
 
-                val overlayActive = booted && cfg.globals.enabled
+                val padVisible by showTouchOverlay
+                val overlayActive = booted && cfg.globals.enabled && padVisible
                 // onStart/onStop co-own the sampler thread: no PixelCopy polling while backgrounded.
                 DisposableEffect(overlayActive) {
                     overlayWantsBrightness = overlayActive
@@ -275,7 +278,7 @@ class EmulatorHostActivity : ComponentActivity(), SurfaceHolder.Callback {
                     // Stay MOUNTED whenever enabled (alpha drives only the DRAW): the pointerInput
                     // must keep receiving touches so the auto-hide wake tap fires, and so a held
                     // control is never unmounted mid-press (stuck).
-                    if (booted && cfg.globals.enabled) {
+                    if (booted && cfg.globals.enabled && padVisible) {
                         GamepadOverlay(
                             controls = controls,
                             opacity = alpha,
@@ -296,6 +299,7 @@ class EmulatorHostActivity : ComponentActivity(), SurfaceHolder.Callback {
                         if (!booted) return@LaunchedEffect
                         while (isActive) {
                             showFpsOverlay.value = session.showDebugOverlayEnabled()
+                            showTouchOverlay.value = session.showTouchOverlayEnabled()
                             delay(1000)
                         }
                     }
@@ -411,6 +415,8 @@ class EmulatorHostActivity : ComponentActivity(), SurfaceHolder.Callback {
                 if (menuOpen) xendroidTheme {
                     PauseMenuPanel(
                         selected = panelSelectedState.intValue,
+                        touchOverlayShown = showTouchOverlay.value,
+                        onToggleTouchOverlay = { toggleTouchOverlay() },
                         onResume = { closeMenuAndResume() },
                         onQuit = { finish() },
                         modifier = Modifier.fillMaxSize(),
@@ -692,10 +698,31 @@ class EmulatorHostActivity : ComponentActivity(), SurfaceHolder.Callback {
         // Last: a guest prompt opened over the menu owns the input until it is answered.
         if (menuOpenState.value) {
             return PanelNav(PAUSE_OPTION_COUNT,
-                { i -> if (i == PAUSE_OPTION_QUIT) finish() else closeMenuAndResume() },
+                { i ->
+                    when (i) {
+                        PAUSE_OPTION_QUIT -> finish()
+                        PAUSE_OPTION_TOUCH_OVERLAY -> toggleTouchOverlay()
+                        else -> closeMenuAndResume()
+                    }
+                },
                 { closeMenuAndResume() })
         }
         return null
+    }
+
+    /** Flips the live cvar for an immediate effect and persists it, leaving the menu open so
+     *  the result is visible behind it. */
+    private fun toggleTouchOverlay() {
+        val next = !showTouchOverlay.value
+        showTouchOverlay.value = next
+        session.setShowTouchOverlay(next)
+        lifecycleScope.launch(Dispatchers.IO) {
+            runCatching {
+                val handle = ConfigStore(applicationContext).openLive()
+                handle.putBool("HID", "show_touch_overlay", next)
+                handle.closeFile()
+            }.onFailure { Log.w(TAG, "persisting show_touch_overlay failed", it) }
+        }
     }
 
     private fun closeMenuAndResume() {

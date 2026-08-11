@@ -43,6 +43,8 @@ public class Emulator extends xendroid.emulator.Emulator{
     // overlay applied by LoadGameConfig at boot). Poll post-boot: the per-game override
     // lands on the detached boot thread, so this only reflects it after the game loads.
     public native boolean show_debug_overlay_enabled();
+    public native boolean show_touch_overlay_enabled();
+    public native void set_show_touch_overlay(boolean value);
 
     // Mount the ISO at isoPath (a REAL host ISO path == game.launchUri in
     // real-path mode), walk its filesystem and pack it into a VERIFIED .zar at

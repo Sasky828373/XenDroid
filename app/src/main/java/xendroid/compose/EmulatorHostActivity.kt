@@ -122,7 +122,10 @@ class EmulatorHostActivity : ComponentActivity(), SurfaceHolder.Callback {
     private var hapticsEnabled = false
     private val bootedState = mutableStateOf(false)
     private val showFpsOverlay = mutableStateOf(false) // Display|show_debug_overlay (native TOML config)
-    private val showTouchOverlay = mutableStateOf(true)  // HID|show_touch_overlay
+    // Null until the first post-boot poll reads HID|show_touch_overlay. Mounting the overlay
+    // on an assumed value and unmounting a tick later fires its release-all teardown while
+    // the core is still booting.
+    private val showTouchOverlay = mutableStateOf<Boolean?>(null)
     private val menuOpenState = mutableStateOf(false)
     private val keyboardRequestState =
         mutableStateOf<Emulator.KeyboardRequest?>(null)
@@ -260,7 +263,7 @@ class EmulatorHostActivity : ComponentActivity(), SurfaceHolder.Callback {
                 val alpha by animateFloatAsState(
                     if (visible) cfg.globals.opacity else 0f, tween(500), label = "padAlpha")
 
-                val padVisible by showTouchOverlay
+                val padVisible = showTouchOverlay.value == true
                 val overlayActive = booted && cfg.globals.enabled && padVisible
                 // onStart/onStop co-own the sampler thread: no PixelCopy polling while backgrounded.
                 DisposableEffect(overlayActive) {
@@ -415,7 +418,7 @@ class EmulatorHostActivity : ComponentActivity(), SurfaceHolder.Callback {
                 if (menuOpen) xendroidTheme {
                     PauseMenuPanel(
                         selected = panelSelectedState.intValue,
-                        touchOverlayShown = showTouchOverlay.value,
+                        touchOverlayShown = showTouchOverlay.value == true,
                         onToggleTouchOverlay = { toggleTouchOverlay() },
                         onResume = { closeMenuAndResume() },
                         onQuit = { finish() },
@@ -713,7 +716,7 @@ class EmulatorHostActivity : ComponentActivity(), SurfaceHolder.Callback {
     /** Flips the live cvar for an immediate effect and persists it, leaving the menu open so
      *  the result is visible behind it. */
     private fun toggleTouchOverlay() {
-        val next = !showTouchOverlay.value
+        val next = showTouchOverlay.value != true
         showTouchOverlay.value = next
         session.setShowTouchOverlay(next)
         lifecycleScope.launch(Dispatchers.IO) {

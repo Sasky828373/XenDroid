@@ -1527,7 +1527,7 @@ bool VulkanTextureCache::IsResolveDestEligible(const Texture& texture) const {
     }
     return ResolveDestsCoverSurface(
         texture_base, texture_size, d.pitch_div_32, key.GetWidth(),
-        key.GetHeight(),
+        key.GetHeight(), key.format, uint32_t(key.endianness),
         static_cast<const VulkanTexture&>(texture)
             .resolve_dest_written_frame());
   }
@@ -1536,12 +1536,10 @@ bool VulkanTextureCache::IsResolveDestEligible(const Texture& texture) const {
 
 // A byte union misses the unwritten columns of sub-rectangle resolves, so
 // require full-width resolves to cover every row.
-bool VulkanTextureCache::ResolveDestsCoverSurface(uint32_t base,
-                                                  uint32_t size_bytes,
-                                                  uint32_t pitch_div_32,
-                                                  uint32_t width,
-                                                  uint32_t height,
-                                                  uint64_t frame) const {
+bool VulkanTextureCache::ResolveDestsCoverSurface(
+    uint32_t base, uint32_t size_bytes, uint32_t pitch_div_32, uint32_t width,
+    uint32_t height, xenos::TextureFormat format, uint32_t endian,
+    uint64_t frame) const {
   if (!width || !height) {
     return false;
   }
@@ -1554,9 +1552,19 @@ bool VulkanTextureCache::ResolveDestsCoverSurface(uint32_t base,
     if (!d.width || !d.height || d.frame != frame) {
       continue;
     }
+    // Only a resolve that stored into the image covers it. One refused for
+    // pitch, format or bounds still wrote shared memory, so counting it would
+    // serve the previous frame's texels over the rows it never touched.
+    if (!d.wrote_texture) {
+      continue;
+    }
     // Strips advance the base, so accept any resolve inside the surface.
     if (d.base < base || d.base >= base + size_bytes ||
         d.pitch_div_32 != pitch_div_32) {
+      continue;
+    }
+    if (format != GetBaseFormat(xenos::TextureFormat(d.format)) ||
+        d.endian >= 4 || endian != d.endian) {
       continue;
     }
     // Partial width leaves columns unwritten - it can never contribute.

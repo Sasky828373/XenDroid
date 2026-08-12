@@ -38,6 +38,13 @@ class VulkanTextureCache final : public TextureCache {
     uint32_t format;    // xenos::ColorFormat
     uint32_t endian;    // copy_dest_info.copy_dest_endian
     uint32_t is_array;  // copy_dest_info.copy_dest_array
+    // Whether the resolve also stored into the promoted texture. Every resolve
+    // is recorded, because promotion decides from this history and cannot store
+    // before it has happened, but only a resolve that actually wrote the image
+    // may count towards covering it - one refused for pitch, format or bounds
+    // updates shared memory alone, and serving over it shows the previous
+    // frame's texels.
+    uint32_t wrote_texture;
     // Memory is reused across scenes, so coverage must only trust resolves
     // from the frame being served.
     uint64_t frame;
@@ -73,10 +80,13 @@ class VulkanTextureCache final : public TextureCache {
   size_t resolve_dests_next_ = 0;
   // Whether a resolve wrote everything the texture would be uploaded from.
   bool IsResolveDestEligible(const Texture& texture) const;
-  // Whether full-width resolves have covered every row of the surface.
+  // Whether full-width resolves that STORED INTO THE IMAGE have covered every
+  // row of the surface. Format and endian are matched per span: a same-base
+  // resolve in another format was refused the store, so it covers nothing.
   bool ResolveDestsCoverSurface(uint32_t base, uint32_t size_bytes,
                                 uint32_t pitch_div_32, uint32_t width,
-                                uint32_t height, uint64_t frame) const;
+                                uint32_t height, xenos::TextureFormat format,
+                                uint32_t endian, uint64_t frame) const;
   VulkanTexture* FindResolveDestTexture(
       uint32_t base, uint32_t* base_delta_out = nullptr) const;
   bool ShouldPromoteToResolveDest(const TextureKey& key) const;

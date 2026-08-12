@@ -57,7 +57,6 @@ class AAudioAudioDriver : public AudioDriver {
       aaudio_result_t error);
 
   // Callback thread only.
-  void ConcealGap(float* output, int32_t out_samples, int32_t copy_samples);
   void ApplyFadeIn();
   // AAudio has no stream volume control, so this is done in software.
   // Callback thread only.
@@ -113,6 +112,17 @@ class AAudioAudioDriver : public AudioDriver {
 
   bool fade_in_pending_ = false;
 
+  // Rate control state; callback thread only.
+  float rate_ = 1.0f;
+  float resample_frac_ = 0.0f;
+  float prev_l_ = 0.0f, prev_r_ = 0.0f;
+  float cur_l_ = 0.0f, cur_r_ = 0.0f;
+  float conceal_gain_ = 1.0f;
+
+  // Next source block: a queued frame if there is one, else a decayed repeat.
+  void LoadNextBlock(uint32_t& releases, bool& gapped);
+  void ConcealNextBlock();
+
   // Written by the realtime callback, drained by recovery_thread_: relaxed
   // atomics only, nothing that could block the callback.
   std::atomic<uint64_t> stat_callbacks_{0};
@@ -123,6 +133,7 @@ class AAudioAudioDriver : public AudioDriver {
   std::atomic<int32_t> stat_unexpected_frames_{0};
   // Samples the downmix pushed past full scale.
   std::atomic<uint64_t> stat_clipped_{0};
+  std::atomic<uint32_t> stat_rate_milli_{1000};
   void LogAndResetStats();
 
   // Per-driver volume (XMP): written by other threads, read by the callback.

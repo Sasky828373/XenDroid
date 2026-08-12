@@ -578,6 +578,36 @@ void VulkanTextureCache::BeginSubmission(uint64_t new_submission_index) {
   }
 }
 
+void VulkanTextureCache::TransitionTextureForGuestShader(
+    VulkanTexture& texture) {
+  texture.MarkAsUsed();
+  // A promoted resolve destination parks in GENERAL, sampleable and storable,
+  // so the in-pass store never needs a mid-pass layout transition.
+  VulkanTexture::Usage new_usage =
+      texture.resolve_dest_storage_view() != VK_NULL_HANDLE
+          ? VulkanTexture::Usage::kResolveDestStorage
+          : VulkanTexture::Usage::kGuestShaderSampled;
+  VkPipelineStageFlags dst_stage_mask;
+  VkAccessFlags dst_access_mask;
+  VkImageLayout new_layout;
+  GetTextureUsageMasks(new_usage, dst_stage_mask, dst_access_mask, new_layout);
+  VulkanTexture::Usage old_usage = texture.SetUsage(new_usage);
+  // An unchanged usage still needs a barrier when an in-pass store happened:
+  // nothing else orders the fragment's imageStore before the sampled read.
+  bool pending_store = texture.ConsumePendingStorageWrite();
+  if (old_usage != new_usage || pending_store) {
+    VkPipelineStageFlags src_stage_mask;
+    VkAccessFlags src_access_mask;
+    VkImageLayout old_layout;
+    GetTextureUsageMasks(old_usage, src_stage_mask, src_access_mask,
+                         old_layout);
+    command_processor_.PushImageMemoryBarrier(
+        texture.image(), ui::vulkan::util::InitializeSubresourceRange(),
+        src_stage_mask, dst_stage_mask, src_access_mask, dst_access_mask,
+        old_layout, new_layout);
+  }
+}
+
 void VulkanTextureCache::RequestTextures(uint32_t used_texture_mask) {
 #if XE_GPU_FINE_GRAINED_DRAW_SCOPES
   SCOPE_profile_cpu_f("gpu");
@@ -586,11 +616,6 @@ void VulkanTextureCache::RequestTextures(uint32_t used_texture_mask) {
   TextureCache::RequestTextures(used_texture_mask);
 
   // Transition the textures into the needed usage.
-  VkPipelineStageFlags dst_stage_mask;
-  VkAccessFlags dst_access_mask;
-  VkImageLayout new_layout;
-  GetTextureUsageMasks(VulkanTexture::Usage::kGuestShaderSampled,
-                       dst_stage_mask, dst_access_mask, new_layout);
   uint32_t textures_remaining = used_texture_mask;
   uint32_t index;
   while (xe::bit_scan_forward(textures_remaining, &index)) {
@@ -599,44 +624,13 @@ void VulkanTextureCache::RequestTextures(uint32_t used_texture_mask) {
     if (!binding) {
       continue;
     }
-    VulkanTexture* binding_texture =
-        static_cast<VulkanTexture*>(binding->texture);
-    if (binding_texture != nullptr) {
-      // Will be referenced by the command buffer, so mark as used.
-      binding_texture->MarkAsUsed();
-      VulkanTexture::Usage old_usage =
-          binding_texture->SetUsage(VulkanTexture::Usage::kGuestShaderSampled);
-      if (old_usage != VulkanTexture::Usage::kGuestShaderSampled) {
-        VkPipelineStageFlags src_stage_mask;
-        VkAccessFlags src_access_mask;
-        VkImageLayout old_layout;
-        GetTextureUsageMasks(old_usage, src_stage_mask, src_access_mask,
-                             old_layout);
-        command_processor_.PushImageMemoryBarrier(
-            binding_texture->image(),
-            ui::vulkan::util::InitializeSubresourceRange(), src_stage_mask,
-            dst_stage_mask, src_access_mask, dst_access_mask, old_layout,
-            new_layout);
-      }
+    if (binding->texture != nullptr) {
+      TransitionTextureForGuestShader(
+          *static_cast<VulkanTexture*>(binding->texture));
     }
-    VulkanTexture* binding_texture_signed =
-        static_cast<VulkanTexture*>(binding->texture_signed);
-    if (binding_texture_signed != nullptr) {
-      binding_texture_signed->MarkAsUsed();
-      VulkanTexture::Usage old_usage = binding_texture_signed->SetUsage(
-          VulkanTexture::Usage::kGuestShaderSampled);
-      if (old_usage != VulkanTexture::Usage::kGuestShaderSampled) {
-        VkPipelineStageFlags src_stage_mask;
-        VkAccessFlags src_access_mask;
-        VkImageLayout old_layout;
-        GetTextureUsageMasks(old_usage, src_stage_mask, src_access_mask,
-                             old_layout);
-        command_processor_.PushImageMemoryBarrier(
-            binding_texture_signed->image(),
-            ui::vulkan::util::InitializeSubresourceRange(), src_stage_mask,
-            dst_stage_mask, src_access_mask, dst_access_mask, old_layout,
-            new_layout);
-      }
+    if (binding->texture_signed != nullptr) {
+      TransitionTextureForGuestShader(
+          *static_cast<VulkanTexture*>(binding->texture_signed));
     }
   }
 }
@@ -1407,6 +1401,13 @@ VkImageView VulkanTextureCache::GetResolveDestStorageView(
   if (!texture) {
     return VK_NULL_HANDLE;
   }
+  // A layout transition is illegal inside the render pass, so the store is
+  // only offered once the image is parked in GENERAL - its next guest bind
+  // does that, and until then the refusal leaves a coverage gap that routes
+  // the texture through the ordinary upload.
+  if (texture->usage() != VulkanTexture::Usage::kResolveDestStorage) {
+    return VK_NULL_HANDLE;
+  }
   if (info_out) {
     const TextureKey& key = texture->key();
     info_out->width = key.GetWidth();
@@ -1421,6 +1422,9 @@ void VulkanTextureCache::MarkResolveDestWritten(uint32_t base,
                                                 uint64_t frame) {
   if (VulkanTexture* texture = FindResolveDestTexture(base)) {
     texture->SetResolveDestWrittenFrame(frame);
+    // The fragment's imageStore is only ordered before later sampled reads by
+    // the barrier the next bind emits for this flag.
+    texture->SetPendingStorageWrite();
   }
 }
 
@@ -3650,6 +3654,14 @@ void VulkanTextureCache::GetTextureUsageMasks(VulkanTexture::Usage usage,
       stage_mask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
       access_mask = VK_ACCESS_SHADER_READ_BIT;
       layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+      break;
+    case VulkanTexture::Usage::kResolveDestStorage:
+      // Sampled by guest shaders and stored by in-pass resolve fragments;
+      // GENERAL so a mid-pass store never needs a layout transition.
+      stage_mask =
+          guest_shader_pipeline_stages_ | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+      access_mask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+      layout = VK_IMAGE_LAYOUT_GENERAL;
       break;
   }
 }

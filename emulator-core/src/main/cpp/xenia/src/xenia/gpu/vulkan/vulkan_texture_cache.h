@@ -354,11 +354,17 @@ class VulkanTextureCache final : public TextureCache {
       kTransferDestination,
       kGuestShaderSampled,
       kSwapSampled,
+      // Promoted resolve destinations park here: GENERAL layout, sampleable
+      // AND storable, so an in-pass resolve never needs a mid-pass layout
+      // transition. STORAGE usage already forfeits UBWC on Adreno, so
+      // sampling from GENERAL costs these images nothing extra.
+      kResolveDestStorage,
     };
 
    private:
     VkImageView resolve_dest_storage_view_ = VK_NULL_HANDLE;
     uint64_t resolve_dest_written_frame_ = 0;
+    bool pending_storage_write_ = false;
 
    public:
     // Takes ownership of the image and its memory.
@@ -384,6 +390,15 @@ class VulkanTextureCache final : public TextureCache {
     void SetResolveDestWrittenFrame(uint64_t frame) {
       resolve_dest_written_frame_ = frame;
     }
+    Usage usage() const { return usage_; }
+    // An in-pass store happened and no barrier has covered it yet; the next
+    // bind must emit one even though the usage does not change.
+    bool ConsumePendingStorageWrite() {
+      bool pending = pending_storage_write_;
+      pending_storage_write_ = false;
+      return pending;
+    }
+    void SetPendingStorageWrite() { pending_storage_write_ = true; }
 
     // Doesn't transition (the caller must insert the barrier).
     Usage SetUsage(Usage new_usage) {
@@ -519,6 +534,10 @@ class VulkanTextureCache final : public TextureCache {
   void GetTextureUsageMasks(VulkanTexture::Usage usage,
                             VkPipelineStageFlags& stage_mask,
                             VkAccessFlags& access_mask, VkImageLayout& layout);
+  // Transitions a texture for guest-shader use: kResolveDestStorage (GENERAL)
+  // for promoted resolve destinations, kGuestShaderSampled otherwise, with a
+  // barrier when the usage changes or an in-pass store is pending.
+  void TransitionTextureForGuestShader(VulkanTexture& texture);
 
   xenos::ClampMode NormalizeClampMode(xenos::ClampMode clamp_mode) const;
 

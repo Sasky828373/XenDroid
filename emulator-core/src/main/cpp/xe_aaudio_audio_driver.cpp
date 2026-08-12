@@ -171,6 +171,12 @@ void AAudioAudioDriver::Pause() {
 
 void AAudioAudioDriver::Resume() {
   std::unique_lock<std::mutex> stream_guard(stream_mutex_);
+  // Resuming at the rate the drained queue asked for would play slow; block
+  // position and resampler history carry over, so playback stays continuous.
+  rate_ = 1.0f;
+  conceal_gain_ = 1.0f;
+  gap_blocks_ = 0;
+  stat_rate_milli_.store(1000, std::memory_order_relaxed);
   if (stream_initialized_ && stream_) {
     AAudioStream_requestStart(stream_);
   }

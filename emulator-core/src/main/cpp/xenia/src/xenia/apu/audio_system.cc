@@ -675,6 +675,17 @@ void AudioSystem::Pause() {
   pending_work_event_->Set();
   pause_fence_.Wait();
 
+  // Only once the worker is parked: a running sink drains a queue nothing is
+  // refilling, which reads as a starving producer.
+  {
+    auto global_lock = global_critical_region_.Acquire();
+    for (size_t i = 0; i < kMaximumClientCount; ++i) {
+      if (clients_[i].in_use && clients_[i].driver) {
+        clients_[i].driver->Pause();
+      }
+    }
+  }
+
   xma_decoder_->Pause();
 }
 
@@ -683,6 +694,15 @@ void AudioSystem::Resume() {
     return;
   }
   paused_ = false;
+
+  {
+    auto global_lock = global_critical_region_.Acquire();
+    for (size_t i = 0; i < kMaximumClientCount; ++i) {
+      if (clients_[i].in_use && clients_[i].driver) {
+        clients_[i].driver->Resume();
+      }
+    }
+  }
 
   resume_event_->Set();
 

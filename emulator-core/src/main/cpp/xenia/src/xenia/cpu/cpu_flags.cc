@@ -17,6 +17,11 @@ DEFINE_string(
     "database.",
     "CPU");
 
+DEFINE_string(dump_functions_at, "",
+              "Comma-separated guest addresses (hex) whose PPC source, "
+              "optimized HIR and host machine code are written to "
+              "<log dir>/fndump_<address>.txt when first translated.",
+              "CPU");
 DEFINE_bool(disassemble_functions, false,
             "Disassemble functions during generation.", "CPU");
 

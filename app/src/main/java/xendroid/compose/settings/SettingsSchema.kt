@@ -240,6 +240,7 @@ object SettingsSchema {
         )),
 
         SettingsCategory("APU", listOf(
+            b("APU", "apu_pump_topup", "Audio pump top-up", true),
             i("Console", "xmp_default_volume", "XMP default volume", 70, 0, 100),
             b("APU", "ffmpeg_verbose", "FFmpeg verbose", false),
             b("APU", "mute", "Mute", false),

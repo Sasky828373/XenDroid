@@ -56,6 +56,10 @@ DEFINE_uint32(apu_max_queued_frames, 8,
               "delay. Lowering this value might cause performance issues. "
               "Value range: [4-64]",
               "APU");
+DEFINE_bool(apu_pump_topup, true,
+            "Let the audio buffer refill at up to twice real time while it is "
+            "running low, instead of only one frame per 5.33ms interval.",
+            "APU");
 DEFINE_bool(
     apu_performance_hint, true,
     "Register an ADPF performance hint session over the guest dispatch and "
@@ -352,8 +356,6 @@ void AudioSystem::WorkerThreadMain() {
     if (client_callback) {
       SCOPE_profile_cpu_i("apu", "xe::apu::AudioSystem->client_callback");
       uint64_t args[] = {client_callback_arg};
-      // Nothing was queued, so no consume will release this credit; leaking
-      // it would permanently lower the reachable queue depth.
       uint32_t submitted_before =
           clients_[client_index].frames_submitted.load();
 #if XE_PLATFORM_xendroid
@@ -369,36 +371,32 @@ void AudioSystem::WorkerThreadMain() {
 #endif
       bool submitted =
           clients_[client_index].frames_submitted.load() != submitted_before;
-      if (!submitted) {
-        client_semaphores_[client_index]->Release(1, nullptr);
-      }
 
       // Deadline pacing alone submits one block per interval, matching the
-      // drain rate, so the sink never builds depth nor recovers after an
-      // underrun. Spare credits become depth, up to apu_max_queued_frames.
-      // Bounded: once Execute outruns the interval, returning credits would
-      // trap the worker here.
-      uint32_t topup_budget = queued_frames_;
-      while (submitted && topup_budget-- && worker_running_ && !paused_ &&
-             xe::threading::Wait(client_semaphores_[client_index].get(), false,
-                                 std::chrono::milliseconds(0)) ==
-                 xe::threading::WaitResult::kSuccess) {
-        bool still_in_use;
-        {
-          auto global_lock = global_critical_region_.Acquire();
-          still_in_use = clients_[client_index].in_use;
+      // drain rate, so the sink cannot refill after an underrun. Add at most
+      // one extra frame per interval while it is below half full: the guest
+      // then runs at most twice real time, briefly. Credits alone are not a
+      // usable signal for this - a guest that submits several frames from one
+      // callback, or from another thread, breaks the one-credit-one-frame
+      // assumption and the buffer gets driven far past real time, which some
+      // titles answer with corrupted audio.
+      AudioDriver* driver = nullptr;
+      {
+        auto global_lock = global_critical_region_.Acquire();
+        if (clients_[client_index].in_use) {
+          driver = clients_[client_index].driver;
         }
-        if (!still_in_use) {
-          break;
-        }
-        submitted_before = clients_[client_index].frames_submitted.load();
+      }
+      // Refill to above the driver's rate-control depth, or playback slows at
+      // a depth this loop is happy to sit at.
+      const size_t topup_below = std::max<size_t>(queued_frames_ / 2, 4);
+      if (submitted && cvars::apu_pump_topup && driver && !paused_ &&
+          worker_running_ && driver->GetQueuedFrameCount() < topup_below &&
+          xe::threading::Wait(client_semaphores_[client_index].get(), false,
+                              std::chrono::milliseconds(0)) ==
+              xe::threading::WaitResult::kSuccess) {
         processor_->Execute(worker_thread_->thread_state(), client_callback,
                             args, xe::countof(args));
-        if (clients_[client_index].frames_submitted.load() ==
-            submitted_before) {
-          client_semaphores_[client_index]->Release(1, nullptr);
-          break;
-        }
       }
     }
   }

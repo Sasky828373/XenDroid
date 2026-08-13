@@ -20,6 +20,7 @@ object SettingDescriptions {
         "break_condition_truncate" to "Truncates the conditional-breakpoint register value to 32 bits before comparing",
         "break_on_start" to "Breaks into the debugger as soon as the emulator starts",
         "break_on_unimplemented_instructions" to "Breaks into the debugger (or crashes) when an unimplemented PowerPC instruction is hit",
+        "apu_pump_topup" to "Keep the audio buffer full by submitting ahead; turn off if a game's audio distorts",
         "clear_memory_page_state" to "Refresh memory page state so GPU-written data is visible; off is slightly faster but may break rendering",
         "clock_no_scaling" to "Bypasses guest clock scaling and pulls time straight from the host; ignores time scalar",
         "clock_source_raw" to "Uses the raw CPU counter (CNTVCT) as the time source instead of OS clock calls",

@@ -42,6 +42,9 @@ namespace aaudio {
 
 static constexpr uint32_t kStatsIntervalMs = 1000;
 
+// Sink depth, in blocks, below which playback slows to buy the producer time.
+static constexpr uint32_t kRateControlDepth = 3;
+
 AAudioAudioDriver::AAudioAudioDriver(Memory* memory,
                                      xe::threading::Semaphore* semaphore,
                                      uint32_t frequency, uint32_t channels,
@@ -182,6 +185,11 @@ void AAudioAudioDriver::Resume() {
   }
 }
 
+size_t AAudioAudioDriver::GetQueuedFrameCount() {
+  std::unique_lock<std::mutex> guard(frames_mutex_);
+  return frames_queued_.size();
+}
+
 void AAudioAudioDriver::SetVolume(float volume) {
   // AAudio has no per-stream volume; applied to the samples in the callback.
   driver_volume_.store(std::clamp(volume, 0.0f, 1.0f),
@@ -215,9 +223,13 @@ aaudio_data_callback_result_t AAudioAudioDriver::AudioCallback(
     std::unique_lock<std::mutex> guard(driver->frames_mutex_);
     depth_now = static_cast<uint32_t>(driver->frames_queued_.size());
   }
+  // Only once the sink is close to running dry, and always below the depth the
+  // producer refills to (AudioSystem's top-up line) - bending pitch at a depth
+  // the producer is content with leaves the rate permanently modulated.
   float rate_target = 1.0f;
-  if (cvars::apu_aaudio_dynamic_rate && depth_now < 6) {
-    rate_target = std::max(0.90f, 1.0f - 0.02f * (6 - depth_now));
+  if (cvars::apu_aaudio_dynamic_rate && depth_now < kRateControlDepth) {
+    rate_target =
+        std::max(0.90f, 1.0f - 0.05f * float(kRateControlDepth - depth_now));
   }
   driver->rate_ +=
       std::clamp(rate_target - driver->rate_, -0.003f, 0.003f);

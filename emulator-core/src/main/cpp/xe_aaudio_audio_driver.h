@@ -41,6 +41,7 @@ class AAudioAudioDriver : public AudioDriver {
     void Pause() override;
     void Resume() override;
     void SetVolume(float volume) override;
+  size_t GetQueuedFrameCount() override;
   void SubmitFrame(float* frame) override;
   void Shutdown();
 

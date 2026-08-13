@@ -400,36 +400,8 @@ bool PPCTranslator::Translate(GuestFunction* function,
 }
 
 bool PPCTranslator::IsDumpTarget(uint32_t address) {
-  if (cvars::dump_functions_at.empty()) {
-    return false;
-  }
-  const std::string& list = cvars::dump_functions_at;
-  for (size_t pos = 0; pos < list.size();) {
-    size_t end = list.find(',', pos);
-    if (end == std::string::npos) {
-      end = list.size();
-    }
-    std::string entry = list.substr(pos, end - pos);
-    pos = end + 1;
-    size_t first = entry.find_first_not_of(" \t");
-    if (first == std::string::npos) {
-      continue;
-    }
-    entry = entry.substr(first, entry.find_last_not_of(" \t") - first + 1);
-    if (entry.size() > 2 && (entry[0] == '0') &&
-        (entry[1] == 'x' || entry[1] == 'X')) {
-      entry = entry.substr(2);
-    }
-    if (entry.size() > 4 &&
-        (entry.compare(0, 4, "sub_") == 0 || entry.compare(0, 4, "SUB_") == 0)) {
-      entry = entry.substr(4);
-    }
-    uint32_t parsed = 0;
-    if (std::sscanf(entry.c_str(), "%X", &parsed) == 1 && parsed == address) {
-      return true;
-    }
-  }
-  return false;
+  return !cvars::dump_functions_at.empty() &&
+         GuestAddressInList(cvars::dump_functions_at, address);
 }
 
 void PPCTranslator::DumpTargetFunction(GuestFunction* function) {

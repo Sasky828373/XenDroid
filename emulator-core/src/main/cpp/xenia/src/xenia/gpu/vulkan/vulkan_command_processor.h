@@ -1140,6 +1140,9 @@ class VulkanCommandProcessor final : public CommandProcessor {
   // bind de-dup compares slot pointers and the deferred command buffer
   // resolves the handle at replay.
   const std::atomic<VkPipeline>* current_guest_graphics_pipeline_;
+  // The handle the last recorded deferred bind captured; the first draw after
+  // the slot fills or swaps re-records with the new handle.
+  VkPipeline current_guest_graphics_pipeline_handle_ = VK_NULL_HANDLE;
   VkPipeline current_external_graphics_pipeline_;
   VkPipeline current_external_compute_pipeline_;
 

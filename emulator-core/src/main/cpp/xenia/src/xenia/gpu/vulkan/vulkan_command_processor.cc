@@ -3685,6 +3685,7 @@ void VulkanCommandProcessor::BindExternalGraphicsPipeline(
                                              pipeline);
   current_external_graphics_pipeline_ = pipeline;
   current_guest_graphics_pipeline_ = nullptr;
+  current_guest_graphics_pipeline_handle_ = VK_NULL_HANDLE;
   current_guest_graphics_pipeline_layout_ = VK_NULL_HANDLE;
 }
 
@@ -4251,10 +4252,18 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   // invalidation can be re-run after in-pass transfers replace the bound
   // pipeline (see below, after entering the render pass).
   auto bind_guest_graphics_pipeline = [&]() {
-  if (current_guest_graphics_pipeline_ != &pipeline->pipeline) {
+  // Bind the handle observed when this draw's bindings were decided
+  // (current_pipeline, loaded above), not the slot at replay time: the
+  // recorded descriptor sets cover only that pipeline's layout. A draw
+  // recorded while the slot was empty is dropped at replay even if the
+  // async creation finishes in between. De-dup on the handle, so the first
+  // draw after the slot fills (or swaps placeholder to real) re-records.
+  if (current_guest_graphics_pipeline_ != &pipeline->pipeline ||
+      current_guest_graphics_pipeline_handle_ != current_pipeline) {
     deferred_command_buffer_.CmdVkBindPipelineDeferred(
-        VK_PIPELINE_BIND_POINT_GRAPHICS, &pipeline->pipeline);
+        VK_PIPELINE_BIND_POINT_GRAPHICS, current_pipeline);
     current_guest_graphics_pipeline_ = &pipeline->pipeline;
+    current_guest_graphics_pipeline_handle_ = current_pipeline;
     current_external_graphics_pipeline_ = VK_NULL_HANDLE;
   }
   auto pipeline_layout = static_cast<const PipelineLayout*>(
@@ -6212,6 +6221,7 @@ bool VulkanCommandProcessor::BeginSubmission(bool is_guest_command) {
     // without emitting an end (it would land in the new, unrelated buffer).
     pass_ts_open_pair_ = UINT32_MAX;
     current_guest_graphics_pipeline_ = nullptr;
+    current_guest_graphics_pipeline_handle_ = VK_NULL_HANDLE;
     current_external_graphics_pipeline_ = VK_NULL_HANDLE;
     current_external_compute_pipeline_ = VK_NULL_HANDLE;
     current_guest_graphics_pipeline_layout_ = nullptr;

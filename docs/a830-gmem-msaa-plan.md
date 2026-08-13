@@ -343,3 +343,82 @@ window trick decodes in seconds):
 
 Toolkit gained: `dmesg` fault headers without root; trimmed-rd windowed
 decode (seconds vs minutes); rd files are gzip despite the .rd name.
+
+---
+
+## Addendum 4 — the wedge is localized; shared-constants prime suspect
+
+Full structure of the frozen submission (s3522, mapped packet-by-packet):
+one GMEM MSAA pass (binning marker 0x2 → BV section → BR with concurrent
+binning ENABLED → 4 tiles of [0x84 draws 0x85 tile-store 0x7]) → three
+post-pass marker-0x8 sections → one DIRECT pass executed OK → freeze in the
+second DIRECT prologue, ~250 dwords after the GMEM pass.
+
+Decoded the small IBs:
+
+- The per-tile store IB is well-formed: color store (MSAA_TWO, gmem 0) +
+  depth store (gmem 0x684000) + CCU_END_RESOLVE_GROUP. (Correctness sidebar:
+  MSAA depth store carries SAMPLE_0 — likely drops sample 1; not the hang.)
+- **The marker-0x8 post-pass stubs are SP_SHARED_CONSTANT_GFX writes**, and
+  the kernel fault header's "BR last IB2" (0x40431ce120) is exactly one of
+  them: the GPU's last completed act was a shared-constant write while BV
+  was live in concurrent-binning mode.
+
+Precedent: the a650 4-squares bug — shared-const execution-overlap race,
+WFI-proven ([[turnip-a650-4squares-investigation]]). XenDroid auto-applies
+`TU_DEBUG=push_consts_per_stage` ONLY for a6xx (`vulkan_instance.cc` checks
+gpu_model/100==6); a830 never gets it.
+
+Two free discriminators (properties only, dmesg as readout — freeze PC
+moves/vanishes if the mechanism is hit):
+
+1. `debug.mesa.tu.debug=push_consts_per_stage`  ← ARMED
+2. `debug.mesa.tu.debug=nocb` (no concurrent binning) — next if (1) is clean
+   or unclear; separates shared-consts from BV/BR concurrency generally.
+
+If (1) fixes it: the driver-side fix is routing shared constants per-stage
+(or fencing shared-const updates against the concurrent pipe) on a8xx —
+plus XenDroid extending its auto-flag to gen8. If (2) fixes it and (1)
+does not: the fix is in the concurrent-binning rendezvous protocol.
+
+---
+
+## Addendum 5 — protocol arms exhausted; synthetic repro is clean; moving to stream replay
+
+Further negative results (each verified applied):
+
+- `rg=sl` (singleton resolve groups + LAST=1 on every op): **faults.**
+- `vulkan_in_pass_resolve=false` (xenia's local_read resolves off): **faults.**
+- `ccu=full`, `a825`: fault. `ccucntl` override: **impossible** — RB_CCU_CNTL
+  is CP-protected on gen8 (`CP | Protected mode error | WRITE | addr=0x08e07`);
+  the kernel fixes full-concurrent resolve mode for all userspace including
+  the blob. TU_DEBUG noconcurrentresolves/unresolves are silent no-ops on
+  A8XX (`tu6_init_static_regs` writes RB_CCU_CNTL only `if (CHIP == A7XX)`).
+- `nocb` IS honored (drirc allow_concurrent_binning=false) — concurrency
+  genuinely tested and cleared.
+
+**Standalone reproducer built and run on-device** (direct HAL-module loading —
+the Android driver exports only `HMI`, no ICD symbols):
+18 cases, all CLEAN in both forced-GMEM and default-heuristic modes:
+{1x,2x,4x} × {color-only, +D24S8} × {RGBA8, RGBA16F} × {store, dontcare},
+plus vkCmdResolveImage after the pass, vkCmdClearColorImage between passes,
+second pass per cmdbuf, 3-deep pipelined submissions, and real VB/IB indexed
+draws (VFD traffic). **Plain MSAA GMEM rendering works on a830.** The wedge
+requires something in xenia's stream beyond all of the above.
+
+**Next: replay the actual captured faulting stream.** mesa's
+`src/freedreno/decode/replay.c` supports KGSL: allocate one huge buffer
+(kgsl VA base is deterministic - probe measured 0x4000000000 every time),
+place captured buffers at original-address offsets, submit the captured IB1s
+via IOCTL_KGSL_GPU_COMMAND. Game buffers span base..+~1.1GB → needs a ~2GB
+fake address space. Building mesa's replay for Android fights libdrm/
+libarchive deps; a minimal purpose-built kgsl replayer (rd parser already
+written, kgsl ioctls already exercised by the probes) is the fast path.
+Then bisect the faulting IB1 packet-by-packet (truncate/NOP progressively) -
+the wedge packet falls out mechanically, no more hypotheses needed.
+
+Artifacts: reproducer + probes in session scratchpad `repro/`; rd captures
+of the faulting frame pulled and decoded; vendor kernel tree at
+~/mesa-turnip/graphics-kernel (gen8_0_0 = the 12MB a830-class entry;
+gen8_3_0 in the vendor gpulist is a 576KB-GMEM small SKU, NOT a830 —
+corrects the old memory note).

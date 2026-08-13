@@ -638,19 +638,33 @@ void VulkanTextureCache::RequestTextures(uint32_t used_texture_mask) {
 VkImageLayout VulkanTextureCache::GetActiveBindingImageLayout(
     uint32_t fetch_constant_index, xenos::FetchOpDimension dimension,
     bool is_signed) const {
+  // Resolved the same way GetActiveBindingOrNullImageView resolves the view,
+  // fallbacks included: the layout must describe the image that view actually
+  // points at. Every fallback (null views, the flattened 3D-as-2D image) lives
+  // in SHADER_READ_ONLY_OPTIMAL; only a view backed by a promoted resolve
+  // destination is in GENERAL.
   const TextureBinding* binding = GetValidTextureBinding(fetch_constant_index);
-  if (binding && AreDimensionsCompatible(dimension, binding->key.dimension)) {
-    const Texture* texture =
-        (is_signed && texture_util::IsAnySignSigned(binding->swizzled_signs) &&
-         IsSignedVersionSeparateForFormat(binding->key))
-            ? binding->texture_signed
-            : binding->texture;
-    if (texture && static_cast<const VulkanTexture*>(texture)->usage() ==
-                       VulkanTexture::Usage::kResolveDestStorage) {
-      return VK_IMAGE_LAYOUT_GENERAL;
-    }
+  if (!binding || !AreDimensionsCompatible(dimension, binding->key.dimension)) {
+    return VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
   }
-  return VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+  if (dimension == xenos::FetchOpDimension::k2D &&
+      binding->key.dimension == xenos::DataDimension::k3D) {
+    return VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+  }
+  const VulkanTextureBinding& vulkan_binding =
+      vulkan_texture_bindings_[fetch_constant_index];
+  if ((is_signed ? vulkan_binding.image_view_signed
+                 : vulkan_binding.image_view_unsigned) == VK_NULL_HANDLE) {
+    return VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+  }
+  const Texture* texture =
+      (is_signed && IsSignedVersionSeparateForFormat(binding->key))
+          ? binding->texture_signed
+          : binding->texture;
+  return texture && static_cast<const VulkanTexture*>(texture)->usage() ==
+                        VulkanTexture::Usage::kResolveDestStorage
+             ? VK_IMAGE_LAYOUT_GENERAL
+             : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 }
 
 VkImageView VulkanTextureCache::GetActiveBindingOrNullImageView(

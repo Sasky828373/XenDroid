@@ -176,6 +176,10 @@ constexpr VkDescriptorPoolSize
     VulkanCommandProcessor::kDescriptorPoolSizeStorageBuffer = {
         VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, kLinkedTypeDescriptorPoolSetCount};
 
+constexpr VkDescriptorPoolSize
+    VulkanCommandProcessor::kDescriptorPoolSizeStorageImage = {
+        VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, kLinkedTypeDescriptorPoolSetCount};
+
 // 2x descriptors for texture images because of unsigned and signed bindings.
 constexpr VkDescriptorPoolSize
     VulkanCommandProcessor::kDescriptorPoolSizeTextures[2] = {
@@ -204,6 +208,12 @@ VulkanCommandProcessor::VulkanCommandProcessor(
               graphics_system->provider())
               ->vulkan_device(),
           &kDescriptorPoolSizeStorageBuffer, 1,
+          kLinkedTypeDescriptorPoolSetCount),
+      transient_descriptor_allocator_storage_image_(
+          static_cast<const ui::vulkan::VulkanProvider*>(
+              graphics_system->provider())
+              ->vulkan_device(),
+          &kDescriptorPoolSizeStorageImage, 1,
           kLinkedTypeDescriptorPoolSetCount),
       transient_descriptor_allocator_textures_(
           static_cast<const ui::vulkan::VulkanProvider*>(
@@ -3389,14 +3399,22 @@ VkDescriptorSet VulkanCommandProcessor::AllocateSingleTransientDescriptor(
             SingleTransientDescriptorLayout::kStorageBufferCompute ||
         transient_descriptor_layout ==
             SingleTransientDescriptorLayout::kStorageBufferFragment;
+    bool is_storage_image =
+        transient_descriptor_layout ==
+        SingleTransientDescriptorLayout::kStorageImageFragment;
     ui::vulkan::LinkedTypeDescriptorSetAllocator&
         transient_descriptor_allocator =
-            is_storage_buffer ? transient_descriptor_allocator_storage_buffer_
-                              : transient_descriptor_allocator_uniform_buffer_;
+            is_storage_image
+                ? transient_descriptor_allocator_storage_image_
+                : (is_storage_buffer
+                       ? transient_descriptor_allocator_storage_buffer_
+                       : transient_descriptor_allocator_uniform_buffer_);
     VkDescriptorPoolSize descriptor_count;
-    descriptor_count.type = is_storage_buffer
-                                ? VK_DESCRIPTOR_TYPE_STORAGE_BUFFER
-                                : VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+    descriptor_count.type =
+        is_storage_image
+            ? VK_DESCRIPTOR_TYPE_STORAGE_IMAGE
+            : (is_storage_buffer ? VK_DESCRIPTOR_TYPE_STORAGE_BUFFER
+                                 : VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER);
     descriptor_count.descriptorCount = 1;
     descriptor_set = transient_descriptor_allocator.Allocate(
         GetSingleTransientDescriptorLayout(transient_descriptor_layout),
@@ -6751,6 +6769,7 @@ void VulkanCommandProcessor::ClearTransientDescriptorPools() {
   }
   single_transient_descriptors_used_.clear();
   transient_descriptor_allocator_storage_buffer_.Reset();
+  transient_descriptor_allocator_storage_image_.Reset();
   transient_descriptor_allocator_uniform_buffer_.Reset();
 }
 

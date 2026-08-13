@@ -635,6 +635,24 @@ void VulkanTextureCache::RequestTextures(uint32_t used_texture_mask) {
   }
 }
 
+VkImageLayout VulkanTextureCache::GetActiveBindingImageLayout(
+    uint32_t fetch_constant_index, xenos::FetchOpDimension dimension,
+    bool is_signed) const {
+  const TextureBinding* binding = GetValidTextureBinding(fetch_constant_index);
+  if (binding && AreDimensionsCompatible(dimension, binding->key.dimension)) {
+    const Texture* texture =
+        (is_signed && texture_util::IsAnySignSigned(binding->swizzled_signs) &&
+         IsSignedVersionSeparateForFormat(binding->key))
+            ? binding->texture_signed
+            : binding->texture;
+    if (texture && static_cast<const VulkanTexture*>(texture)->usage() ==
+                       VulkanTexture::Usage::kResolveDestStorage) {
+      return VK_IMAGE_LAYOUT_GENERAL;
+    }
+  }
+  return VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+}
+
 VkImageView VulkanTextureCache::GetActiveBindingOrNullImageView(
     uint32_t fetch_constant_index, xenos::FetchOpDimension dimension,
     bool is_signed) {

@@ -7919,6 +7919,11 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
             texture_cache->GetActiveBindingOrNullImageView(
                 texture_binding.fetch_constant, texture_binding.dimension,
                 bool(texture_binding.is_signed)))));
+        // The written descriptor also carries the image layout, which changes
+        // when a texture is promoted to a resolve destination mid-frame.
+        scratch.push_back(uint64_t(texture_cache->GetActiveBindingImageLayout(
+            texture_binding.fetch_constant, texture_binding.dimension,
+            bool(texture_binding.is_signed))));
       }
     }
     if (sampler_count) {
@@ -8091,7 +8096,9 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
               texture_binding.fetch_constant, texture_binding.dimension,
               bool(texture_binding.is_signed));
       descriptor_image_info.imageLayout =
-          VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+          texture_cache_->GetActiveBindingImageLayout(
+              texture_binding.fetch_constant, texture_binding.dimension,
+              bool(texture_binding.is_signed));
     }
   }
   size_t vertex_sampler_image_info_offset = descriptor_write_image_info_.size();
@@ -8114,7 +8121,9 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
               texture_binding.fetch_constant, texture_binding.dimension,
               bool(texture_binding.is_signed));
       descriptor_image_info.imageLayout =
-          VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+          texture_cache_->GetActiveBindingImageLayout(
+              texture_binding.fetch_constant, texture_binding.dimension,
+              bool(texture_binding.is_signed));
     }
   }
   size_t pixel_sampler_image_info_offset = descriptor_write_image_info_.size();

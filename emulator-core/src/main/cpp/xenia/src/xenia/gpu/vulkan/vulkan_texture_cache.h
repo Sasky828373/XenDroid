@@ -159,6 +159,12 @@ class VulkanTextureCache final : public TextureCache {
   // preceding host GPU work.
   void RequestTextures(uint32_t used_texture_mask) override;
 
+  // Layout the active binding's image currently resides in: GENERAL for
+  // promoted resolve destinations, SHADER_READ_ONLY_OPTIMAL otherwise (and for
+  // the null views). Descriptor writes must match it or sampling is undefined.
+  VkImageLayout GetActiveBindingImageLayout(uint32_t fetch_constant_index,
+                                            xenos::FetchOpDimension dimension,
+                                            bool is_signed) const;
   VkImageView GetActiveBindingOrNullImageView(uint32_t fetch_constant_index,
                                               xenos::FetchOpDimension dimension,
                                               bool is_signed);

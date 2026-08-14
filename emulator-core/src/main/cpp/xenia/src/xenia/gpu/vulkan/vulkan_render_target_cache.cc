@@ -87,7 +87,7 @@ DEFINE_bool(
     "break. Disable for A/B measurement of the break count.",
     "Vulkan");
 DEFINE_bool(
-    vulkan_in_pass_resolve, true,
+    vulkan_in_pass_resolve, false,
     "Prepare color attachments for in-pass EDRAM resolves with "
     "VK_KHR_dynamic_rendering_local_read: RENDERING_LOCAL_READ image layout "
     "and input-attachment usage on color render targets. Requires dynamic "

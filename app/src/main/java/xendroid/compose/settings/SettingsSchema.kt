@@ -94,6 +94,7 @@ object SettingsSchema {
             b("Kernel", "allow_incompatible_title_update", "Allow incompatible title update", true),
             b("Kernel", "apply_title_update", "Apply title update", true),
             b("Kernel", "kernel_debug_monitor", "Kernel debug monitor", false),
+            b("Kernel", "network_enabled", "Networking", true),
         )),
 
         SettingsCategory("Controller", listOf(

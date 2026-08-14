@@ -62,6 +62,8 @@ object SettingDescriptions {
         "kernel_cert_monitor" to "Reports the certification monitor as present to the game (debug/testing feature)",
         "kernel_debug_monitor" to "Reports a debug monitor (remote debugger) as attached to the game",
         "kernel_display_gamma_type" to "Display gamma curve reported to games; BT.709 best matches a 360 on an HDTV",
+        "network_enabled" to "Lets games open network sockets. They cannot reach a real peer, but " +
+            "some games crash when socket creation fails. Turn off only for a game that hangs online",
         "kernel_pix" to "Exposes the PIX GPU profiler interface to the game for debug captures",
         "license_mask" to "Content license mask: 0 = none, 1 = full-version license (unlocks XBLA trials), -1 = all",
         "log_safepoint_pc" to "Records where each guest thread last reached a yield point, so a freeze report can say where a stuck thread actually is instead of only where it last called from. Slows the emulator slightly; turn on only when chasing a freeze",

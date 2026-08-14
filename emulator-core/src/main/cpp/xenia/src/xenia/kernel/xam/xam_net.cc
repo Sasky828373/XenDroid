@@ -19,11 +19,12 @@
 #include "xenia/kernel/xthread.h"
 #include "xenia/xbox.h"
 
-DEFINE_bool(network_enabled, false,
+DEFINE_bool(network_enabled, true,
             "Let titles open host sockets. The XNet address and session layer "
-            "is stubbed, so guest traffic cannot reach a peer; enabling this "
-            "only binds real host ports and lets titles enter online paths "
-            "that may block indefinitely.",
+            "is stubbed, so guest traffic cannot reach a peer, but titles that "
+            "do not check for socket creation failure crash outright when this "
+            "is off. Turn it off only for titles that block indefinitely on a "
+            "socket that never answers.",
             "Kernel");
 
 #ifdef XE_PLATFORM_WIN32

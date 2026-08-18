@@ -18,7 +18,7 @@ and keep the code compatible with Xenia licenses.
 
 ## Issue Policy
 To avoid unnecessary toxicity, issues have been limited to contributors only. If you want to report issues,
-you can use the `xenia-android` channel on Xenia's discord and reach us out. Only detailed reports will be
+you can use the `xenia-help` channel on Xenia's discord and reach us out. Only detailed reports will be
 taken in consideration. Generic and repeated complaints will be ignored. 
 
 In order to give detailed reports, you must compare the android port with `Xenia Edge` using `Vulkan` as a backend. Make sure that the

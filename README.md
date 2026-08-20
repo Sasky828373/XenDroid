@@ -16,10 +16,8 @@ and keep the code compatible with Xenia licenses.
 - The ONLY reliable source for the apk is in the [releases](https://github.com/rfandango/XenDroid/releases/latest) section, along with the distributed source code.
   - We cannot be held responsible for edited apks by unkown users, you have been warned.
 
-## Issue Policy
-To avoid unnecessary toxicity, issues have been limited to contributors only. If you want to report issues,
-you can use the `xenia-help` channel on Xenia's discord and reach us out. Only detailed reports will be
-taken in consideration. Generic and repeated complaints will be ignored. 
+## Issue Reporting
+A dedicated repo will be made to do reports. As of now critical issues are known.
 
 In order to give detailed reports, you must compare the android port with `Xenia Edge` using `Vulkan` as a backend. Make sure that the
 issues can be reproduced only on Android. If the issues are on Edge too, then we wait for the developers to fix

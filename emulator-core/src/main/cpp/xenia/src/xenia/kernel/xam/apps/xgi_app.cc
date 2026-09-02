@@ -328,9 +328,25 @@ case 0x000B0013: {
 
       uint32_t size = *size_ptr;
 
-      // XSESSION_LOCAL_DETAILS itself is 0x80 bytes.
-      if (size < 0x80) {
-        *size_ptr = 0x80;
+      uint32_t players =
+          bo2_local_session_active ? bo2_local_user_count : 0;
+
+      // XSESSION_LOCAL_DETAILS = 0x80 bytes.
+      // Every returned XSESSION_MEMBER needs another 0x10 bytes.
+      //
+      // Do NOT return success with ActualMemberCount=1 while the caller only
+      // supplied 0x80 bytes, because then SessionMembers_ptr cannot contain
+      // that player. BO2 sees the lobby player visually, but considers the
+      // playable session to contain zero valid members.
+      uint32_t required_size = 0x80 + (players * 0x10);
+
+      if (size < required_size) {
+        XELOGD(
+            "BO2 XSessionGetDetails buffer too small: have={:X}, need={:X}, "
+            "players={}",
+            size, required_size, players);
+
+        *size_ptr = required_size;
         return X_ERROR_INSUFFICIENT_BUFFER;
       }
 
@@ -338,9 +354,6 @@ case 0x000B0013: {
           memory_->TranslateVirtual<uint8_t*>(details_ptr);
 
       std::memset(d, 0, size);
-
-      uint32_t players =
-          bo2_local_session_active ? bo2_local_user_count : 0;
 
       uint32_t public_slots =
           bo2_local_public_slots ? bo2_local_public_slots : 4;
@@ -356,7 +369,11 @@ case 0x000B0013: {
       xe::store_and_swap<uint32_t>(d + 0x18, available_public);
       xe::store_and_swap<uint32_t>(d + 0x1C, bo2_local_private_slots);
       xe::store_and_swap<uint32_t>(d + 0x20, players);
-      xe::store_and_swap<uint32_t>(d + 0x24, players);
+
+      // We already required enough room for every local member above.
+      uint32_t returned_players = players;
+      xe::store_and_swap<uint32_t>(d + 0x24, returned_players);
+
       xe::store_and_swap<uint32_t>(d + 0x28, 0);
 
       // Only append XSESSION_MEMBER when the caller actually supplied

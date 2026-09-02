@@ -10,6 +10,9 @@
 #ifndef XENIA_KERNEL_XSESSION_H_
 #define XENIA_KERNEL_XSESSION_H_
 
+#include "xenia/base/byte_order.h"
+#include "xenia/kernel/xobject.h"
+
 namespace xe {
 namespace kernel {
 
@@ -47,6 +50,37 @@ inline bool IsOfflineSession(const SessionFlags flags) { return !flags; }
 inline bool IsXboxLiveSession(const SessionFlags flags) {
   return !IsOfflineSession(flags) && flags & SessionFlags::LIVE_FEATURES;
 }
+
+
+// Minimal real XSession object used by local/offline sessions.
+//
+// XObject::SetNativePointer currently stores its internal object signature
+// in the first 0x10 bytes of the guest object, therefore allocate 0x10
+// instead of the 4-byte X_KSESSION used by newer desktop Xenia builds.
+// The first dword still contains the session handle expected by XAM.
+struct X_KSESSION_MINI {
+  xe::be<uint32_t> handle;
+  uint8_t reserved[0x0C];
+};
+static_assert_size(X_KSESSION_MINI, 0x10);
+
+class XSession : public XObject {
+ public:
+  static const XObject::Type kObjectType = XObject::Type::Session;
+
+  explicit XSession(KernelState* kernel_state)
+      : XObject(kernel_state, kObjectType) {}
+
+  X_STATUS Initialize() {
+    auto* guest = CreateNative<X_KSESSION_MINI>();
+    if (!guest) {
+      return X_STATUS_NO_MEMORY;
+    }
+
+    guest->handle = handle();
+    return X_STATUS_SUCCESS;
+  }
+};
 
 }  // namespace kernel
 }  // namespace xe

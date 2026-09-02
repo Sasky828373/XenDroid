@@ -514,7 +514,8 @@ dword_result_t NetDll_XNetGetTitleXnAddr_entry(dword_t caller,
 
   std::memset(addr_ptr->abOnline, 0, 20);
 
-  return XnAddrStatus::XNET_GET_XNADDR_STATIC;
+  return XnAddrStatus::XNET_GET_XNADDR_ETHERNET |
+         XnAddrStatus::XNET_GET_XNADDR_STATIC;
 }
 DECLARE_XAM_EXPORT1(NetDll_XNetGetTitleXnAddr, kNetworking, kStub);
 
@@ -583,7 +584,9 @@ struct XEthernetStatus {
 };
 
 dword_result_t NetDll_XNetGetEthernetLinkStatus_entry(dword_t caller) {
-  return 0;
+  return XEthernetStatus::XNET_ETHERNET_LINK_ACTIVE |
+         XEthernetStatus::XNET_ETHERNET_LINK_100MBPS |
+         XEthernetStatus::XNET_ETHERNET_LINK_FULL_DUPLEX;
 }
 DECLARE_XAM_EXPORT1(NetDll_XNetGetEthernetLinkStatus, kNetworking, kStub);
 

@@ -77,109 +77,15 @@ jobs:
           print("BO2 network patch applied.")
           PY
 
-      - name: Patch BO2 one-player local session
-        run: |
-          python3 - <<'PY'
-          from pathlib import Path
-
-          p = Path(
-              "emulator-core/src/main/cpp/xenia/src/xenia/kernel/xam/apps/xgi_app.cc"
-          )
-          s = p.read_text()
-
-          marker = "    case 0x000B0021: {"
-
-          patch = r'''
-              case 0x000B001D: {
-                XELOGD("XSessionGetDetails - BO2 one player local");
-
-                if (!buffer || buffer_length != 0x18) {
-                  return X_E_INVALIDARG;
-                }
-
-                uint32_t details_buffer_size_ptr =
-                    xe::load_and_swap<uint32_t>(buffer + 0x4);
-                uint32_t session_details_ptr =
-                    xe::load_and_swap<uint32_t>(buffer + 0x8);
-
-                if (!details_buffer_size_ptr || !session_details_ptr) {
-                  return X_E_INVALIDARG;
-                }
-
-                auto size_ptr =
-                    memory_->TranslateVirtual<xe::be<uint32_t>*>(
-                        details_buffer_size_ptr);
-
-                uint32_t details_size = *size_ptr;
-
-                // XSESSION_LOCAL_DETAILS = 0x80 bytes
-                // + one XSESSION_MEMBER = 0x10 bytes.
-                if (details_size < 0x90) {
-                  *size_ptr = 0x90;
-                  return X_ERROR_INSUFFICIENT_BUFFER;
-                }
-
-                uint8_t* details =
-                    memory_->TranslateVirtual<uint8_t*>(
-                        session_details_ptr);
-
-                std::memset(details, 0, details_size);
-
-                // XSESSION_LOCAL_DETAILS offsets.
-                xe::store_and_swap<uint32_t>(details + 0x00, 0);  // Host user index.
-                xe::store_and_swap<uint32_t>(details + 0x0C, 0x21);  // HOST | SYSTEMLINK.
-
-                xe::store_and_swap<uint32_t>(details + 0x10, 4);  // Max public.
-                xe::store_and_swap<uint32_t>(details + 0x14, 0);  // Max private.
-
-                xe::store_and_swap<uint32_t>(details + 0x18, 3);  // Available public.
-                xe::store_and_swap<uint32_t>(details + 0x1C, 0);  // Available private.
-
-                xe::store_and_swap<uint32_t>(details + 0x20, 1);  // ActualMemberCount.
-                xe::store_and_swap<uint32_t>(details + 0x24, 1);  // ReturnedMemberCount.
-
-                // XSESSION_STATE::LOBBY = 0.
-                xe::store_and_swap<uint32_t>(details + 0x28, 0);
-
-                // One XSESSION_MEMBER directly after 0x80-byte details struct.
-                uint8_t* member = details + 0x80;
-
-                xe::store_and_swap<uint64_t>(
-                    member + 0x00,
-                    0xE03000000BEE0DF5ULL);
-
-                xe::store_and_swap<uint32_t>(
-                    member + 0x08,
-                    0);  // UserIndex
-
-                xe::store_and_swap<uint32_t>(
-                    member + 0x0C,
-                    0);  // Flags
-
-                // SessionMembers_ptr is final uint32 in 0x80-byte structure.
-                xe::store_and_swap<uint32_t>(
-                    details + 0x7C,
-                    session_details_ptr + 0x80);
-
-                XELOGD(
-                    "BO2 fake session: ActualMemberCount=1 ReturnedMemberCount=1");
-
-                return X_E_SUCCESS;
-              }
-
-          '''
-
-          if "XSessionGetDetails - BO2 one player local" not in s:
-              if marker not in s:
-                  raise SystemExit("Insertion point not found")
-              s = s.replace(marker, patch + marker, 1)
-
-          p.write_text(s)
-          print("BO2 one-player session patch applied.")
-          PY
-
       - name: Make Gradle executable
         run: chmod +x gradlew
+
+      - name: Configure CMake 3.30.3
+        run: |
+          echo "sdk.dir=$ANDROID_SDK_ROOT" > local.properties
+          echo "cmake.dir=$ANDROID_SDK_ROOT/cmake/3.30.3" >> local.properties
+          cat local.properties
+          "$ANDROID_SDK_ROOT/cmake/3.30.3/bin/cmake" --version
 
       - name: Build XenDroid APK
         run: |

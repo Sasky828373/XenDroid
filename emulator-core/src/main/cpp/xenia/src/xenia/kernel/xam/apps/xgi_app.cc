@@ -1,3 +1,4 @@
+#include <cstring>
 /**
  ******************************************************************************
  * Xenia : Xbox 360 Emulator Research Project                                 *
@@ -16,6 +17,15 @@ namespace xe {
 namespace kernel {
 namespace xam {
 namespace apps {
+
+// Minimal local session state for BO2 Zombies.
+static bool bo2_local_session_active = false;
+static uint32_t bo2_local_session_flags = 0;
+static uint32_t bo2_local_public_slots = 4;
+static uint32_t bo2_local_private_slots = 0;
+static uint32_t bo2_local_user_count = 0;
+static uint32_t bo2_local_user_index = 0;
+
 /*
  * Most of the structs below were found in the Source SDK, provided as stubs.
  * Specifically, they can be found in the Source 2007 SDK and the Alien Swarm
@@ -226,11 +236,26 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
         return 0x80155209;  // X_ONLINE_E_SESSION_NOT_LOGGED_ON
       }
 
+      bo2_local_session_active = true;
+      bo2_local_session_flags = flags;
+      bo2_local_public_slots = num_slots_public ? num_slots_public : 4;
+      bo2_local_private_slots = num_slots_private;
+
+      // BO2 already has profile 0 visible in the local frontend.
+      // Treat it as the host member immediately.
+      bo2_local_user_count = 1;
+      bo2_local_user_index = 0;
+
+      XELOGD("BO2 local session created: flags={:08X}, players={}",
+             bo2_local_session_flags, bo2_local_user_count);
+
       return X_E_SUCCESS;
     }
     case 0x000B0011: {
       XELOGD("XGISessionDelete({:08X}, {:08X}), implemented in netplay",
              buffer_ptr, buffer_length);
+      bo2_local_session_active = false;
+      bo2_local_user_count = 0;
       return X_STATUS_SUCCESS;
     }
     case 0x000B0012: {
@@ -244,8 +269,32 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
       assert_zero(unk_0);
       XELOGD("XGISessionJoinLocal({:08X}, {}, {}, {:08X}, {:08X})", session_ptr,
              user_count, unk_0, user_index_array, private_slots_array);
+
+      bo2_local_session_active = true;
+
+      if (user_count) {
+        bo2_local_user_count = 1;
+
+        if (user_index_array) {
+          auto users =
+              memory_->TranslateVirtual<xe::be<uint32_t>*>(user_index_array);
+          bo2_local_user_index = users[0];
+        } else {
+          bo2_local_user_index = 0;
+        }
+      }
+
+      XELOGD("BO2 JoinLocal: players={}, user={}",
+             bo2_local_user_count, bo2_local_user_index);
+
       return X_E_SUCCESS;
     }
+case 0x000B0013: {
+  XELOGD("XGISessionLeaveLocal({:08X}, {:08X})",
+         buffer_ptr, buffer_length);
+  bo2_local_user_count = 0;
+  return X_E_SUCCESS;
+}
     case 0x000B0014: {
       // Gets 584107FB in game.
       // get high score table?
@@ -258,6 +307,81 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
              buffer_length);
       return X_STATUS_SUCCESS;
     }
+    case 0x000B001D: {
+      XELOGD("BO2 XSessionGetDetails");
+
+      if (!buffer || buffer_length != 0x18) {
+        return X_E_INVALIDARG;
+      }
+
+      uint32_t details_size_ptr =
+          xe::load_and_swap<uint32_t>(buffer + 0x4);
+      uint32_t details_ptr =
+          xe::load_and_swap<uint32_t>(buffer + 0x8);
+
+      if (!details_size_ptr || !details_ptr) {
+        return X_E_INVALIDARG;
+      }
+
+      auto size_ptr =
+          memory_->TranslateVirtual<xe::be<uint32_t>*>(details_size_ptr);
+
+      uint32_t size = *size_ptr;
+
+      // XSESSION_LOCAL_DETAILS itself is 0x80 bytes.
+      if (size < 0x80) {
+        *size_ptr = 0x80;
+        return X_ERROR_INSUFFICIENT_BUFFER;
+      }
+
+      uint8_t* d =
+          memory_->TranslateVirtual<uint8_t*>(details_ptr);
+
+      std::memset(d, 0, size);
+
+      uint32_t players =
+          bo2_local_session_active ? bo2_local_user_count : 0;
+
+      uint32_t public_slots =
+          bo2_local_public_slots ? bo2_local_public_slots : 4;
+
+      uint32_t available_public =
+          public_slots > players ? public_slots - players : 0;
+
+      // XSESSION_LOCAL_DETAILS
+      xe::store_and_swap<uint32_t>(d + 0x00, bo2_local_user_index);
+      xe::store_and_swap<uint32_t>(d + 0x0C, bo2_local_session_flags);
+      xe::store_and_swap<uint32_t>(d + 0x10, public_slots);
+      xe::store_and_swap<uint32_t>(d + 0x14, bo2_local_private_slots);
+      xe::store_and_swap<uint32_t>(d + 0x18, available_public);
+      xe::store_and_swap<uint32_t>(d + 0x1C, bo2_local_private_slots);
+      xe::store_and_swap<uint32_t>(d + 0x20, players);
+      xe::store_and_swap<uint32_t>(d + 0x24, players);
+      xe::store_and_swap<uint32_t>(d + 0x28, 0);
+
+      // Only append XSESSION_MEMBER when the caller actually supplied
+      // enough room. This avoids the old 0x80 out-of-bounds problem.
+      if (players && size >= 0x90) {
+        uint8_t* member = d + 0x80;
+
+        xe::store_and_swap<uint64_t>(
+            member + 0x00, 0xE03000000BEE0DF5ULL);
+        xe::store_and_swap<uint32_t>(
+            member + 0x08, bo2_local_user_index);
+        xe::store_and_swap<uint32_t>(member + 0x0C, 0);
+
+        xe::store_and_swap<uint32_t>(
+            d + 0x7C, details_ptr + 0x80);
+      } else {
+        xe::store_and_swap<uint32_t>(d + 0x7C, 0);
+      }
+
+      XELOGD("BO2 session details: players={}, size={}",
+             players, size);
+
+      return X_E_SUCCESS;
+    }
+
     case 0x000B0021: {
       XELOGD("XUserReadStats");
 

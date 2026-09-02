@@ -1,0 +1,93 @@
+name: Build XenDroid BO2
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android dependencies
+        run: |
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager \
+            "platforms;android-35" \
+            "build-tools;35.0.0" \
+            "ndk;29.0.14206865" \
+            "cmake;3.30.3"
+
+      - name: Patch BO2 network detection
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          p = Path(
+              "emulator-core/src/main/cpp/xenia/src/xenia/kernel/xam/xam_net.cc"
+          )
+
+          s = p.read_text()
+
+          old_addr = """  return XnAddrStatus::XNET_GET_XNADDR_STATIC;"""
+          new_addr = """  return XnAddrStatus::XNET_GET_XNADDR_ETHERNET |
+                 XnAddrStatus::XNET_GET_XNADDR_STATIC;"""
+
+          if old_addr in s:
+              s = s.replace(old_addr, new_addr, 1)
+
+          old_link = """dword_result_t NetDll_XNetGetEthernetLinkStatus_entry(dword_t caller) {
+            return 0;
+          }"""
+
+          new_link = """dword_result_t NetDll_XNetGetEthernetLinkStatus_entry(dword_t caller) {
+            return XEthernetStatus::XNET_ETHERNET_LINK_ACTIVE |
+                   XEthernetStatus::XNET_ETHERNET_LINK_100MBPS |
+                   XEthernetStatus::XNET_ETHERNET_LINK_FULL_DUPLEX;
+          }"""
+
+          if old_link in s:
+              s = s.replace(old_link, new_link, 1)
+
+          p.write_text(s)
+
+          if "XNET_GET_XNADDR_ETHERNET |" not in s:
+              raise SystemExit("XNetGetTitleXnAddr patch failed")
+
+          if "XNET_ETHERNET_LINK_FULL_DUPLEX;" not in s:
+              raise SystemExit("Ethernet link patch failed")
+
+          print("BO2 network patches applied successfully.")
+          PY
+
+      - name: Make Gradle executable
+        run: chmod +x gradlew
+
+      - name: Build XenDroid APK
+        run: |
+          ./gradlew :app:assembleDebug \
+            --stacktrace \
+            --no-daemon
+
+      - name: Show APK
+        run: |
+          find app/build/outputs/apk -type f -name "*.apk" -ls
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: XenDroid-BO2
+          path: app/build/outputs/apk/debug/*.apk

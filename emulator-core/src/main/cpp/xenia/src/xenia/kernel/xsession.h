@@ -76,10 +76,64 @@ class XSession : public XObject {
     if (!guest) {
       return X_STATUS_NO_MEMORY;
     }
-
     guest->handle = handle();
     return X_STATUS_SUCCESS;
   }
+
+  void CreateLocal(uint32_t user_index, uint32_t flags,
+                   uint32_t public_slots, uint32_t private_slots) {
+    created_ = true;
+    started_ = false;
+    user_index_ = user_index;
+    flags_ = flags;
+    public_slots_ = public_slots ? public_slots : 4;
+    private_slots_ = private_slots;
+    member_count_ = 0;
+    member_xuid_ = 0;
+  }
+
+  void DeleteLocal() {
+    created_ = false;
+    started_ = false;
+    member_count_ = 0;
+    member_xuid_ = 0;
+  }
+
+  void JoinLocal(uint32_t user_index, uint64_t xuid) {
+    user_index_ = user_index;
+    member_xuid_ = xuid;
+    member_count_ = 1;
+  }
+
+  void LeaveLocal() {
+    member_count_ = 0;
+    member_xuid_ = 0;
+  }
+
+  void StartLocal() { started_ = true; }
+  void EndLocal() { started_ = false; }
+
+  bool created() const { return created_; }
+  bool started() const { return started_; }
+
+  uint32_t user_index() const { return user_index_; }
+  uint32_t flags() const { return flags_; }
+  uint32_t public_slots() const { return public_slots_; }
+  uint32_t private_slots() const { return private_slots_; }
+  uint32_t member_count() const { return member_count_; }
+  uint64_t member_xuid() const { return member_xuid_; }
+
+ private:
+  bool created_ = false;
+  bool started_ = false;
+
+  uint32_t user_index_ = 0;
+  uint32_t flags_ = 0;
+  uint32_t public_slots_ = 4;
+  uint32_t private_slots_ = 0;
+
+  uint32_t member_count_ = 0;
+  uint64_t member_xuid_ = 0;
 };
 
 }  // namespace kernel

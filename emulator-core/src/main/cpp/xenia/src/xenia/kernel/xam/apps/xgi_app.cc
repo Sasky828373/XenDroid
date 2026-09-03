@@ -216,7 +216,7 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
 
       auto session =
           XObject::GetNativeObject<XSession>(
-              kernel_state(), host_obj);
+              kernel_state_, host_obj);
 
       if (!session) {
         XELOGE("[BO2SESSION] Create invalid obj {:08X}", obj);
@@ -250,12 +250,15 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
 
       auto session =
           XObject::GetNativeObject<XSession>(
-              kernel_state(), host_obj);
+              kernel_state_, host_obj);
 
       if (!session)
         return X_STATUS_INVALID_HANDLE;
 
       session->DeleteLocal();
+      session->ReleaseHandle();
+
+      XELOGI("[BO2SESSION] Delete OK");
 
       return X_ERROR_SUCCESS;
     }
@@ -272,20 +275,20 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
       uint32_t count = read32(0x04);
 
       // XGI_SESSION_MANAGE layout:
-      // +00 obj
-      // +04 user count
-      // +08 user indices array
-      // +0C private slot flags array
-      // +10 XUID array (zero for JoinLocal)
-      uint32_t indices_ptr = read32(0x08);
-      uint32_t xuid_ptr = read32(0x10);
+      // +00 obj_ptr
+      // +04 array_count
+      // +08 xuid_array_ptr (zero for JoinLocal)
+      // +0C indices_array_ptr
+      // +10 private_slots_array_ptr
+      uint32_t xuid_ptr = read32(0x08);
+      uint32_t indices_ptr = read32(0x0C);
 
       auto host_obj =
           memory_->TranslateVirtual<uint8_t*>(obj);
 
       auto session =
           XObject::GetNativeObject<XSession>(
-              kernel_state(), host_obj);
+              kernel_state_, host_obj);
 
       if (!session) {
         XELOGE("[BO2SESSION] Join invalid obj");
@@ -315,18 +318,18 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
       }
 
       if (user >= XUserMaxUserCount ||
-          !kernel_state()
+          !kernel_state_
                ->xam_state()
                ->IsUserSignedIn(user)) {
         XELOGE(
             "[BO2SESSION] user {} not signed in",
             user);
 
-        return X_ONLINE_E_SESSION_NOT_LOGGED_ON;
+        return 0x80155209;  // X_ONLINE_E_SESSION_NOT_LOGGED_ON
       }
 
       auto profile =
-          kernel_state()
+          kernel_state_
               ->xam_state()
               ->GetUserProfile(user);
 
@@ -353,7 +356,7 @@ case 0x000B0013: {
 
       auto session =
           XObject::GetNativeObject<XSession>(
-              kernel_state(),
+              kernel_state_,
               memory_->TranslateVirtual<uint8_t*>(obj));
 
       if (!session)
@@ -373,7 +376,7 @@ case 0x000B0013: {
 
       auto session =
           XObject::GetNativeObject<XSession>(
-              kernel_state(),
+              kernel_state_,
               memory_->TranslateVirtual<uint8_t*>(obj));
 
       if (!session)
@@ -397,7 +400,7 @@ case 0x000B0013: {
 
       auto session =
           XObject::GetNativeObject<XSession>(
-              kernel_state(),
+              kernel_state_,
               memory_->TranslateVirtual<uint8_t*>(obj));
 
       if (!session)
@@ -429,7 +432,7 @@ case 0x000B0013: {
 
       auto session =
           XObject::GetNativeObject<XSession>(
-              kernel_state(),
+              kernel_state_,
               memory_->TranslateVirtual<uint8_t*>(obj));
 
       if (!session) {
@@ -502,7 +505,7 @@ case 0x000B0013: {
 
       xe::store_and_swap<uint32_t>(
           d + 0x28,
-          session->started() ? 1u : 0u);
+          session->session_state());
 
       if (players) {
         auto member = d + 0x80;

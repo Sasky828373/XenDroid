@@ -84,6 +84,7 @@ class XSession : public XObject {
                    uint32_t public_slots, uint32_t private_slots) {
     created_ = true;
     started_ = false;
+    session_state_ = 0;
     user_index_ = user_index;
     flags_ = flags;
     public_slots_ = public_slots ? public_slots : 4;
@@ -95,6 +96,7 @@ class XSession : public XObject {
   void DeleteLocal() {
     created_ = false;
     started_ = false;
+    session_state_ = 0;
     member_count_ = 0;
     member_xuid_ = 0;
   }
@@ -110,8 +112,15 @@ class XSession : public XObject {
     member_xuid_ = 0;
   }
 
-  void StartLocal() { started_ = true; }
-  void EndLocal() { started_ = false; }
+  void StartLocal() {
+    started_ = true;
+    session_state_ = 3;  // XSESSION_STATE::INGAME
+  }
+
+  void EndLocal() {
+    started_ = false;
+    session_state_ = 4;  // XSESSION_STATE::REPORTING
+  }
 
   bool created() const { return created_; }
   bool started() const { return started_; }
@@ -122,6 +131,7 @@ class XSession : public XObject {
   uint32_t private_slots() const { return private_slots_; }
   uint32_t member_count() const { return member_count_; }
   uint64_t member_xuid() const { return member_xuid_; }
+  uint32_t session_state() const { return session_state_; }
 
  private:
   bool created_ = false;
@@ -134,6 +144,7 @@ class XSession : public XObject {
 
   uint32_t member_count_ = 0;
   uint64_t member_xuid_ = 0;
+  uint32_t session_state_ = 0;
 };
 
 }  // namespace kernel

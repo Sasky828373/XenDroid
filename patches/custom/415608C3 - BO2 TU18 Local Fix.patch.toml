@@ -1,0 +1,17 @@
+title_name = "Call of Duty: Black Ops II - TU18 Local Fix"
+title_id = "415608C3"
+hash = "5699D5C3866AD7DF"
+
+[[patch]]
+name = "BO2 TU18 Local Zombies 1 Player Fix"
+desc = "Fix local Zombies player eligibility for single-player testing."
+author = "XenDroid BO2 Fix"
+is_enabled = true
+
+    [[patch.be32]]
+    address = 0x82230838
+    value = 0x38600001
+
+    [[patch.be32]]
+    address = 0x8223083C
+    value = 0x4E800020

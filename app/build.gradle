@@ -14,6 +14,7 @@ def gamePatchesGenDir = layout.buildDirectory.dir("generated/gamePatches")
 def syncGamePatches = tasks.register('syncGamePatches', Copy) {
     into gamePatchesGenDir.map { it.dir("game-patches") }
     from("$rootDir/patches/xenia-canary/patches") { include '*.patch.toml' }
+    from("$rootDir/patches/custom") { include '*.patch.toml' }
 }
 // AGP doesn't honor the assets.srcDir(...).builtBy() hint, so wire the sync in explicitly.
 tasks.named('preBuild').configure { dependsOn(syncGamePatches) }

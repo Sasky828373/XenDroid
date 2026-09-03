@@ -18,6 +18,7 @@ jobs:
         with:
           distribution: temurin
           java-version: '17'
+          cache: gradle
 
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
@@ -31,11 +32,31 @@ jobs:
             "ndk;29.0.14206865" \
             "cmake;3.30.3"
 
-      - name: Install Vulkan shader tools
+      - name: Install Vulkan shader tools and ccache
         run: |
           sudo apt-get update
-          sudo apt-get install -y glslang-tools
+          sudo apt-get install -y glslang-tools ccache
           glslangValidator --version
+          ccache --version
+
+      - name: Restore C++ compiler cache
+        uses: actions/cache@v4
+        with:
+          path: .ccache
+          key: xendroid-ccache-${{ runner.os }}-${{ github.sha }}
+          restore-keys: |
+            xendroid-ccache-${{ runner.os }}-
+
+      - name: Configure ccache
+        env:
+          CCACHE_DIR: ${{ github.workspace }}/.ccache
+        run: |
+          mkdir -p "$CCACHE_DIR"
+          ccache --set-config=cache_dir="$CCACHE_DIR"
+          ccache --set-config=max_size=2G
+          ccache --set-config=compression=true
+          ccache --zero-stats
+          ccache --show-config
 
       - name: Patch BO2 network detection
         run: |
@@ -88,10 +109,23 @@ jobs:
           "$ANDROID_SDK_ROOT/cmake/3.30.3/bin/cmake" --version
 
       - name: Build XenDroid APK
+        env:
+          CMAKE_C_COMPILER_LAUNCHER: ccache
+          CMAKE_CXX_COMPILER_LAUNCHER: ccache
+          CCACHE_DIR: ${{ github.workspace }}/.ccache
         run: |
+          mkdir -p "$CCACHE_DIR"
+          ccache --set-config=cache_dir="$CCACHE_DIR"
           ./gradlew :app:assembleDebug \
             --stacktrace \
             --no-daemon
+
+      - name: Show ccache statistics
+        if: always()
+        env:
+          CCACHE_DIR: ${{ github.workspace }}/.ccache
+        run: |
+          ccache --show-stats
 
       - name: Show APK
         run: |

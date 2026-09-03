@@ -7,7 +7,9 @@
  ******************************************************************************
  */
 
-#include "xenia/kernel/xam/app_manager.h"\n\n#include <cstring>
+#include "xenia/kernel/xam/app_manager.h"
+
+#include <cstring>
 
 #include "xenia/kernel/kernel_state.h"
 #include "xenia/kernel/xam/apps/messenger_app.h"

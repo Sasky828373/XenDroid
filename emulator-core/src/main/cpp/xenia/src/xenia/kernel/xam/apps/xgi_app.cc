@@ -10,6 +10,8 @@
 
 #include "xenia/kernel/xam/apps/xgi_app.h"
 #include "xenia/kernel/xsession.h"
+#include "xenia/kernel/xam/xam_state.h"
+#include "xenia/kernel/xam/profile_manager.h"
 
 #include "xenia/base/logging.h"
 
@@ -230,7 +232,7 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
       }
 
       auto profile =
-          kernel_state_->user_profile_manager()->GetProfile(
+          kernel_state_->xam_state()->profile_manager()->GetProfile(
               static_cast<uint8_t>(user));
       uint64_t host_xuid = profile ? profile->xuid() : 0;
 

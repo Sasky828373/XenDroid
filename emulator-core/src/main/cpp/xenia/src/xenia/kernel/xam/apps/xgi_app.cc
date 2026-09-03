@@ -362,6 +362,18 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
 case 0x000B0013: {
       XELOGI("[BO2SESSION] LeaveLocal");
 
+      XELOGI(
+          "[BO2SESSION] LeaveLocal raw: "
+          "{:08X} {:08X} {:08X} {:08X} {:08X} {:08X} {:08X} {:08X}",
+          xe::load_and_swap<uint32_t>(buffer + 0),
+          xe::load_and_swap<uint32_t>(buffer + 4),
+          xe::load_and_swap<uint32_t>(buffer + 8),
+          xe::load_and_swap<uint32_t>(buffer + 12),
+          xe::load_and_swap<uint32_t>(buffer + 16),
+          xe::load_and_swap<uint32_t>(buffer + 20),
+          xe::load_and_swap<uint32_t>(buffer + 24),
+          xe::load_and_swap<uint32_t>(buffer + 28));
+
       uint32_t obj =
           static_cast<uint32_t>(
               *reinterpret_cast<xe::be<uint32_t>*>(buffer));

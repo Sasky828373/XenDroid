@@ -229,7 +229,17 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
         return X_ERROR_FUNCTION_FAILED;
       }
 
-      session->CreateLocal(user, flags, pub, priv);
+      auto profile =
+          kernel_state_->user_profile_manager()->GetProfile(
+              static_cast<uint8_t>(user));
+      uint64_t host_xuid = profile ? profile->xuid() : 0;
+
+      XELOGI(
+          "[BO2SESSION] Host profile user={} xuid={:016X}",
+          user, host_xuid);
+
+      session->CreateLocal(
+          user, flags, pub, priv, host_xuid);
 
       XELOGI(
           "[BO2SESSION] Create OK user={} pub={} priv={} flags={:08X}",

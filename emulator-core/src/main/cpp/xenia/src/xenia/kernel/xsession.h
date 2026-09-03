@@ -81,7 +81,8 @@ class XSession : public XObject {
   }
 
   void CreateLocal(uint32_t user_index, uint32_t flags,
-                   uint32_t public_slots, uint32_t private_slots) {
+                   uint32_t public_slots, uint32_t private_slots,
+                   uint64_t host_xuid) {
     created_ = true;
     started_ = false;
     session_state_ = 0;
@@ -89,8 +90,8 @@ class XSession : public XObject {
     flags_ = flags;
     public_slots_ = public_slots ? public_slots : 4;
     private_slots_ = private_slots;
-    member_count_ = 0;
-    member_xuid_ = 0;
+    member_xuid_ = host_xuid;
+    member_count_ = host_xuid ? 1 : 0;
   }
 
   void DeleteLocal() {

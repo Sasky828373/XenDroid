@@ -410,33 +410,30 @@ DECLARE_XAM_EXPORT1(XamUserWriteProfileSettings, kUserProfiles, kImplemented);
 
 dword_result_t XamUserCheckPrivilege_entry(dword_t user_index, dword_t mask,
                                            lpdword_t out_value) {
-  if (user_index == XUserIndexAny) {
-    for (uint8_t i = 0; i < XUserMaxUserCount; ++i) {
-      const auto result = XamUserCheckPrivilege_entry(i, mask, out_value);
-      if (result != X_ERROR_NO_SUCH_USER) {
-        *out_value = 0;
-        return result;
-      }
-    }
-    *out_value = 0;
-    return X_ERROR_NO_SUCH_USER;
-  }
-
-  if (user_index >= XUserMaxUserCount) {
+  // BO2 MP/Zombies queries privileges even for a local/offline player.
+  // Do not require an Xbox LIVE sign-in for local play.
+  if (!out_value) {
     return X_ERROR_INVALID_PARAMETER;
   }
 
-  if (!kernel_state()->xam_state()->IsUserSignedIn(user_index)) {
-    return X_ERROR_NO_SUCH_USER;
+  if (user_index != XUserIndexAny) {
+    if (user_index >= XUserMaxUserCount) {
+      return X_ERROR_INVALID_PARAMETER;
+    }
+
+    if (!kernel_state()->xam_state()->IsUserSignedIn(user_index)) {
+      return X_ERROR_NO_SUCH_USER;
+    }
+  } else {
+    // XenDroid currently supports the local player on slot 0.
+    if (!kernel_state()->xam_state()->IsUserSignedIn(0)) {
+      *out_value = 0;
+      return X_ERROR_NO_SUCH_USER;
+    }
   }
 
-  if (kernel_state()->xam_state()->GetUserProfile(user_index)->signin_state() !=
-      static_cast<uint32_t>(SignInState::SignedInToLive)) {
-    *out_value = 0;
-    return X_ERROR_NOT_LOGGED_ON;
-  }
-
-  // If we deny everything, games should hopefully not try to do stuff.
+  // Same basic behaviour as upstream Xenia:
+  // the privilege query itself succeeds for the signed-in local user.
   *out_value = 0;
   return X_ERROR_SUCCESS;
 }

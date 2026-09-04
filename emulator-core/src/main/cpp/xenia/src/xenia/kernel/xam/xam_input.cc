@@ -126,7 +126,8 @@ dword_result_t XamInputGetState_entry(dword_t user_index, dword_t flags,
   {
     auto lock = input_system->lock();
     result = input_system->GetState(
-        user_index, !flags ? X_INPUT_FLAG::X_INPUT_FLAG_GAMEPAD : flags,
+        actual_user_index,
+        !flags ? X_INPUT_FLAG::X_INPUT_FLAG_GAMEPAD : flags,
         input_state);
   }
 
@@ -178,7 +179,7 @@ dword_result_t XamInputGetKeystroke_entry(
 
   auto input_system = kernel_state()->emulator()->input_system();
   auto lock = input_system->lock();
-  return input_system->GetKeystroke(user_index, flags, keystroke);
+  return input_system->GetKeystroke(actual_user_index, flags, keystroke);
 }
 DECLARE_XAM_EXPORT1(XamInputGetKeystroke, kInput, kImplemented);
 

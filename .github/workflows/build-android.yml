@@ -10,6 +10,11 @@ jobs:
   build:
     runs-on: ubuntu-22.04
 
+    env:
+      CCACHE_DIR: /home/runner/.cache/ccache
+      CCACHE_MAXSIZE: 3G
+      CCACHE_COMPRESS: "true"
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -22,8 +27,19 @@ jobs:
           distribution: temurin
           java-version: '21'
 
+      - name: Setup Gradle cache
+        uses: gradle/actions/setup-gradle@v4
+
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
+
+      - name: Cache Android SDK components
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ env.ANDROID_SDK_ROOT }}/ndk/29.0.14206865
+            ${{ env.ANDROID_SDK_ROOT }}/cmake/3.30.3
+          key: android-sdk-ndk29-cmake3303-v1
 
       - name: Install Android SDK components
         run: |
@@ -41,7 +57,23 @@ jobs:
             ninja-build \
             python3 \
             glslang-tools \
-            spirv-tools
+            spirv-tools \
+            ccache
+
+      - name: Cache C/C++ objects
+        uses: actions/cache@v4
+        with:
+          path: /home/runner/.cache/ccache
+          key: xendroid-ccache-${{ runner.os }}-${{ github.ref_name }}-${{ github.sha }}
+          restore-keys: |
+            xendroid-ccache-${{ runner.os }}-${{ github.ref_name }}-
+            xendroid-ccache-${{ runner.os }}-
+
+      - name: Configure ccache
+        run: |
+          ccache --zero-stats
+          ccache --set-config=max_size=3G
+          ccache --set-config=compression=true
 
       - name: Create local.properties
         run: |
@@ -50,26 +82,47 @@ jobs:
           cmake.dir=${ANDROID_SDK_ROOT}/cmake/3.30.3
           EOF2
 
+      - name: Enable ccache for CMake
+        run: |
+          {
+            echo ""
+            echo "android.native.buildOutput=verbose"
+          } >> gradle.properties
+
+          export CCACHE_CPP2=yes
+          export PATH="/usr/lib/ccache:$PATH"
+
       - name: Make Gradle executable
         run: chmod +x gradlew
 
       - name: Build Debug APK
+        env:
+          CCACHE_CPP2: "yes"
+          PATH: /usr/lib/ccache:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
         run: |
           export LANG=C.UTF-8
           export LC_ALL=C.UTF-8
           export JAVA_TOOL_OPTIONS="-Dfile.encoding=UTF-8"
-          ./gradlew :app:assembleDebug --no-daemon --stacktrace
+
+          ./gradlew :app:assembleDebug \
+            --build-cache \
+            --parallel \
+            --no-daemon \
+            --stacktrace
+
+      - name: Show ccache stats
+        if: always()
+        run: ccache --show-stats || true
 
       - name: Show APKs
         if: always()
-        run: |
-          find . -type f -name "*.apk" -print || true
+        run: find . -type f -name "*.apk" -print || true
 
       - name: Upload APK
         if: success()
         uses: actions/upload-artifact@v4
         with:
           name: XenDroid-BO2-Debug
-          path: |
-            app/build/outputs/apk/debug/*.apk
+          path: app/build/outputs/apk/debug/*.apk
           if-no-files-found: error
+          compression-level: 0

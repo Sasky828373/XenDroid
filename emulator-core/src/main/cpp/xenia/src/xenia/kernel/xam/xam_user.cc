@@ -426,7 +426,7 @@ dword_result_t XamUserCheckPrivilege_entry(dword_t user_index, dword_t mask,
     }
   } else {
     // XenDroid currently supports the local player on slot 0.
-    if (!kernel_state()->xam_state()->IsUserSignedIn(0)) {
+    if (!kernel_state()->xam_state()->IsUserSignedIn(uint32_t{0})) {
       *out_value = 0;
       return X_ERROR_NO_SUCH_USER;
     }

@@ -92,15 +92,25 @@ DECLARE_XAM_EXPORT1(XamUserGetIndexFromXUID, kUserProfiles, kImplemented);
 
 dword_result_t XamUserGetSigninState_entry(dword_t user_index) {
   uint32_t signin_state = 0;
+
   if (user_index >= XUserMaxUserCount) {
+    XELOGI("[BO2USER] SigninState user={} -> 0 invalid",
+           uint32_t(user_index));
     return signin_state;
   }
 
-  if (kernel_state()->xam_state()->IsUserSignedIn(user_index)) {
+  bool signed_in =
+      kernel_state()->xam_state()->IsUserSignedIn(uint32_t(user_index));
+
+  if (signed_in) {
     const auto& user_profile =
-        kernel_state()->xam_state()->GetUserProfile(user_index);
+        kernel_state()->xam_state()->GetUserProfile(uint32_t(user_index));
     signin_state = user_profile->signin_state();
   }
+
+  XELOGI("[BO2USER] SigninState user={} signed={} state={}",
+         uint32_t(user_index), signed_in, signin_state);
+
   return signin_state;
 }
 DECLARE_XAM_EXPORT2(XamUserGetSigninState, kUserProfiles, kImplemented,
@@ -435,6 +445,10 @@ dword_result_t XamUserCheckPrivilege_entry(dword_t user_index, dword_t mask,
   // Same basic behaviour as upstream Xenia:
   // the privilege query itself succeeds for the signed-in local user.
   *out_value = 0;
+
+  XELOGI("[BO2USER] CheckPrivilege user={} mask={:08X} out={} -> SUCCESS",
+         uint32_t(user_index), uint32_t(mask), uint32_t(*out_value));
+
   return X_ERROR_SUCCESS;
 }
 DECLARE_XAM_EXPORT1(XamUserCheckPrivilege, kUserProfiles, kStub);

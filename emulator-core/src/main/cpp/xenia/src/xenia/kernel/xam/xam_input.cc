@@ -104,6 +104,8 @@ dword_result_t XamInputGetState_entry(dword_t user_index, dword_t flags,
     memset((void*)input_state.host_address(), 0, sizeof(X_INPUT_STATE));
   }
   if (user_index >= XUserMaxUserCount) {
+    XELOGI("[BO2INPUT] GetState reject requested={} flags={:08X}",
+           uint32_t(user_index), uint32_t(flags));
     return X_ERROR_DEVICE_NOT_CONNECTED;
   }
 
@@ -136,6 +138,11 @@ dword_result_t XamInputGetState_entry(dword_t user_index, dword_t flags,
       patch->OnInputPoll(input_state->packet_number);
     }
   }
+
+  XELOGI(
+      "[BO2INPUT] GetState requested={} actual={} flags={:08X} result={:08X}",
+      uint32_t(user_index), actual_user_index, uint32_t(flags),
+      uint32_t(result));
 
   return result;
 }
@@ -179,7 +186,15 @@ dword_result_t XamInputGetKeystroke_entry(
 
   auto input_system = kernel_state()->emulator()->input_system();
   auto lock = input_system->lock();
-  return input_system->GetKeystroke(actual_user_index, flags, keystroke);
+
+  auto result =
+      input_system->GetKeystroke(actual_user_index, flags, keystroke);
+
+  XELOGI("[BO2INPUT] GetKeystroke requested={} actual={} flags={:08X} result={:08X}",
+         uint32_t(user_index), actual_user_index, uint32_t(flags),
+         uint32_t(result));
+
+  return result;
 }
 DECLARE_XAM_EXPORT1(XamInputGetKeystroke, kInput, kImplemented);
 
@@ -230,20 +245,37 @@ dword_result_t XamInputGetKeystrokeEx_entry(
 }
 DECLARE_XAM_EXPORT1(XamInputGetKeystrokeEx, kInput, kImplemented);
 
-X_HRESULT_result_t XamUserGetDeviceContext_entry(dword_t user_index,
-                                                 dword_t device_type,
-                                                 lpdword_t out_ptr) {
-  // Games check the result - usually with some masking.
-  // If this function fails they assume zero, so let's fail AND
-  // set zero just to be safe.
+X_HRESULT_result_t XamUserGetDeviceContext_entry(
+    dword_t user_index, dword_t device_type, lpdword_t out_ptr) {
   *out_ptr = 0;
-  if (kernel_state()->xam_state()->IsUserSignedIn(user_index) ||
-      (user_index & XUserIndexAny) == XUserIndexAny) {
-    *out_ptr = (uint32_t)user_index;
-    return X_E_SUCCESS;
-  } else {
-    return X_E_DEVICE_NOT_CONNECTED;
+
+  bool is_any =
+      (uint32_t(user_index) & XUserIndexAny) == XUserIndexAny;
+
+  bool signed_in = false;
+  if (!is_any && uint32_t(user_index) < XUserMaxUserCount) {
+    signed_in =
+        kernel_state()->xam_state()->IsUserSignedIn(uint32_t(user_index));
   }
+
+  if (signed_in || is_any) {
+    *out_ptr = uint32_t(user_index);
+
+    XELOGI(
+        "[BO2INPUT] DeviceContext user={} type={:08X} any={} signed={} "
+        "out={:08X} -> SUCCESS",
+        uint32_t(user_index), uint32_t(device_type), is_any, signed_in,
+        uint32_t(*out_ptr));
+
+    return X_E_SUCCESS;
+  }
+
+  XELOGI(
+      "[BO2INPUT] DeviceContext user={} type={:08X} any={} signed={} "
+      "out=00000000 -> NOT_CONNECTED",
+      uint32_t(user_index), uint32_t(device_type), is_any, signed_in);
+
+  return X_E_DEVICE_NOT_CONNECTED;
 }
 DECLARE_XAM_EXPORT1(XamUserGetDeviceContext, kInput, kStub);
 

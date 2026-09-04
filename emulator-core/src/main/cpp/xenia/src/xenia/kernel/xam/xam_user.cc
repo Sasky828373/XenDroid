@@ -54,16 +54,20 @@ X_HRESULT_result_t XamUserGetXUID_entry(dword_t user_index, dword_t type_mask,
   uint32_t result = X_E_NO_SUCH_USER;
   uint64_t xuid = 0;
 
-  auto type = user_profile->type() & type_mask;
-  if (type & (2 | 4)) {
-    // maybe online profile?
-    xuid = user_profile->xuid();
-    result = X_E_SUCCESS;
-  } else if (type & 1) {
-    // maybe offline profile?
+  // Match newer Xenia/BO2 behaviour:
+  // XenDroid currently has only one local XUID, so use it for
+  // both offline and online XUID requests. Do not reject an
+  // online-XUID request merely because the local profile is offline.
+  if (type_mask & (X_USER_XUID_ONLINE | X_USER_XUID_OFFLINE)) {
     xuid = user_profile->xuid();
     result = X_E_SUCCESS;
   }
+
+  if (type_mask == X_USER_XUID_GUEST) {
+    xuid = 0;
+    result = X_E_NO_SUCH_USER;
+  }
+
   *xuid_ptr = xuid;
   return result;
 }
@@ -138,7 +142,12 @@ X_HRESULT_result_t XamUserGetSigninInfo_entry(
   xe::string_util::copy_truncating(info->name, user_profile->name(),
                                    xe::countof(info->name));
 
-  if (!flags || flags & X_USER_GET_SIGNIN_INFO_OFFLINE_XUID_ONLY) {
+  // BO2 MP/Zombies requests different XUID variants while building
+  // the local lobby. XenDroid currently has one local profile XUID,
+  // so expose it consistently for both offline and online requests.
+  if (!flags ||
+      (flags & X_USER_GET_SIGNIN_INFO_OFFLINE_XUID_ONLY) ||
+      (flags & X_USER_GET_SIGNIN_INFO_ONLINE_XUID_ONLY)) {
     info->xuid = user_profile->xuid();
   }
 

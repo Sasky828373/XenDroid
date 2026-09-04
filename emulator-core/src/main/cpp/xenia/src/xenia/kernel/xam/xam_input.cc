@@ -247,35 +247,38 @@ DECLARE_XAM_EXPORT1(XamInputGetKeystrokeEx, kInput, kImplemented);
 
 X_HRESULT_result_t XamUserGetDeviceContext_entry(
     dword_t user_index, dword_t device_type, lpdword_t out_ptr) {
+  if (!out_ptr) {
+    return X_E_INVALIDARG;
+  }
+
   *out_ptr = 0;
 
-  bool is_any =
+  const bool is_any =
       (uint32_t(user_index) & XUserIndexAny) == XUserIndexAny;
 
-  bool signed_in = false;
-  if (!is_any && uint32_t(user_index) < XUserMaxUserCount) {
-    signed_in =
-        kernel_state()->xam_state()->IsUserSignedIn(uint32_t(user_index));
-  }
+  // XenDroid currently exposes the active local player on slot 0.
+  const uint32_t resolved_user =
+      is_any ? uint32_t{0} : uint32_t(user_index);
 
-  if (signed_in || is_any) {
-    *out_ptr = uint32_t(user_index);
-
+  if (resolved_user >= XUserMaxUserCount ||
+      !kernel_state()->xam_state()->IsUserSignedIn(resolved_user)) {
     XELOGI(
-        "[BO2INPUT] DeviceContext user={} type={:08X} any={} signed={} "
-        "out={:08X} -> SUCCESS",
-        uint32_t(user_index), uint32_t(device_type), is_any, signed_in,
-        uint32_t(*out_ptr));
+        "[BO2INPUT] DeviceContext user={} resolved={} type={:08X} "
+        "-> NOT_CONNECTED",
+        uint32_t(user_index), resolved_user, uint32_t(device_type));
 
-    return X_E_SUCCESS;
+    return X_E_DEVICE_NOT_CONNECTED;
   }
+
+  *out_ptr = resolved_user;
 
   XELOGI(
-      "[BO2INPUT] DeviceContext user={} type={:08X} any={} signed={} "
-      "out=00000000 -> NOT_CONNECTED",
-      uint32_t(user_index), uint32_t(device_type), is_any, signed_in);
+      "[BO2INPUT] DeviceContext user={} resolved={} type={:08X} "
+      "out={:08X} -> SUCCESS",
+      uint32_t(user_index), resolved_user, uint32_t(device_type),
+      uint32_t(*out_ptr));
 
-  return X_E_DEVICE_NOT_CONNECTED;
+  return X_E_SUCCESS;
 }
 DECLARE_XAM_EXPORT1(XamUserGetDeviceContext, kInput, kStub);
 

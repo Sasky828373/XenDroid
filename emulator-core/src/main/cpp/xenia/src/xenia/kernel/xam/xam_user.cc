@@ -443,9 +443,9 @@ dword_result_t XamUserCheckPrivilege_entry(dword_t user_index, dword_t mask,
     }
   }
 
-  // Same basic behaviour as upstream Xenia:
-  // the privilege query itself succeeds for the signed-in local user.
-  *out_value = 0;
+  // BO2 MP/Zombies uses the returned boolean, not only the HRESULT.
+  // A successful local privilege check therefore has to report ALLOWED.
+  *out_value = 1;
 
   XELOGI("[BO2USER] CheckPrivilege user={} mask={:08X} out={} -> SUCCESS",
          uint32_t(user_index), uint32_t(mask), uint32_t(*out_value));

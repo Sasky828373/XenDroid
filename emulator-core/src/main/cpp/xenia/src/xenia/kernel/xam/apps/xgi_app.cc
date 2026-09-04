@@ -438,6 +438,51 @@ case 0x000B0013: {
       return X_ERROR_SUCCESS;
     }
 
+    case 0x000B0018: {
+      // XSessionModify
+      if (!buffer) {
+        return X_ERROR_INVALID_PARAMETER;
+      }
+
+      auto read32 = [&](uint32_t o) {
+        return static_cast<uint32_t>(
+            *reinterpret_cast<xe::be<uint32_t>*>(buffer + o));
+      };
+
+      // XGI_SESSION_MODIFY:
+      // +00 obj_ptr
+      // +04 flags
+      // +08 maxPublicSlots
+      // +0C maxPrivateSlots
+      const uint32_t obj = read32(0x00);
+      const uint32_t flags = read32(0x04);
+      const uint32_t pub = read32(0x08);
+      const uint32_t priv = read32(0x0C);
+
+      auto session =
+          XObject::GetNativeObject<XSession>(
+              kernel_state_,
+              memory_->TranslateVirtual<uint8_t*>(obj));
+
+      if (!session) {
+        return X_STATUS_INVALID_HANDLE;
+      }
+
+      session->ModifyLocal(flags, pub, priv);
+
+      XELOGI(
+          "[BO2SESSION] Modify flags={:08X} pub={} priv={} members={}",
+          flags, pub, priv, session->member_count());
+
+      return X_ERROR_SUCCESS;
+    }
+
+    case 0x000B0019: {
+      // XSessionGetInvitationData.
+      // Nothing is required for local/offline Zombies.
+      return X_ERROR_SUCCESS;
+    }
+
     case 0x000B001D: {
       XELOGI("[BO2SESSION] GetDetails");
 
@@ -570,6 +615,12 @@ case 0x000B0013: {
       return X_ERROR_SUCCESS;
     }
 
+
+    case 0x000B0020: {
+      // XUserResetStatsView.
+      // Local Zombies has no remote stats view to reset.
+      return X_ERROR_SUCCESS;
+    }
 
     case 0x000B0021: {
       XELOGD("XUserReadStats");

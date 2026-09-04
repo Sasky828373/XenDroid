@@ -26,17 +26,17 @@ DECLARE_XAM_EXPORT1(XamPartyGetUserList, kNone, kStub);
 
 dword_result_t XamPartySendGameInvites_entry(dword_t r3, dword_t r4,
                                              dword_t r5) {
-  return X_ERROR_FUNCTION_FAILED;
+  return X_ERROR_SUCCESS;
 }
 DECLARE_XAM_EXPORT1(XamPartySendGameInvites, kNone, kStub);
 
 dword_result_t XamPartySetCustomData_entry(dword_t r3, dword_t r4, dword_t r5) {
-  return X_ERROR_FUNCTION_FAILED;
+  return X_ERROR_SUCCESS;
 }
 DECLARE_XAM_EXPORT1(XamPartySetCustomData, kNone, kStub);
 
 dword_result_t XamPartyGetBandwidth_entry(dword_t r3, dword_t r4) {
-  return X_ERROR_FUNCTION_FAILED;
+  return X_ERROR_SUCCESS;
 }
 DECLARE_XAM_EXPORT1(XamPartyGetBandwidth, kNone, kStub);
 

@@ -85,13 +85,20 @@ class XSession : public XObject {
                    uint64_t host_xuid) {
     created_ = true;
     started_ = false;
-    session_state_ = 0;
+    session_state_ = 1;  // XSESSION_STATE::LOBBY
     user_index_ = user_index;
     flags_ = flags;
     public_slots_ = public_slots ? public_slots : 4;
     private_slots_ = private_slots;
     member_xuid_ = host_xuid;
     member_count_ = host_xuid ? 1 : 0;
+  }
+
+  void ModifyLocal(uint32_t flags, uint32_t public_slots,
+                   uint32_t private_slots) {
+    flags_ = flags;
+    public_slots_ = public_slots;
+    private_slots_ = private_slots;
   }
 
   void DeleteLocal() {
